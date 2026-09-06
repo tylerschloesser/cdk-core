@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, TARGET } from './fixtures.js'
 
 /**
  * The load-bearing streaming test.
@@ -23,13 +23,20 @@ import { expect, test } from '@playwright/test'
  *     stream is delivered incrementally but far slower than it was produced.
  *
  * Together they bracket "incremental, and roughly at the rate the server sent".
+ *
+ * `/events/tick` requires auth, so this runs against `authedPage` — a plain
+ * `page` would 401 before any of this timing matters. That also puts it out of
+ * reach against production, which has no machine user by design (A7); the
+ * production streaming path was measured unauthenticated in Epoch 3 and is
+ * re-checked by hand after a Google login.
  */
-test('sse events arrive incrementally, not in one buffered flush', async ({ page }) => {
-  await page.goto('/')
+test('sse events arrive incrementally, not in one buffered flush', async ({ authedPage }) => {
+  test.skip(TARGET === 'prod', 'production has no machine user — that is A7, not a gap')
+  await authedPage.goto('/')
 
-  await page.getByTestId('stream').click()
+  await authedPage.getByTestId('stream').click()
 
-  const events = page.getByTestId('stream-event')
+  const events = authedPage.getByTestId('stream-event')
   await expect(events).toHaveCount(5, { timeout: 20_000 })
 
   expect(await events.allTextContents()).toEqual(['1', '2', '3', '4', '5'])
@@ -49,4 +56,11 @@ test('sse events arrive incrementally, not in one buffered flush', async ({ page
   for (let i = 1; i < receivedAt.length; i++) {
     expect(receivedAt[i]!).toBeGreaterThanOrEqual(receivedAt[i - 1]!)
   }
+})
+
+// Proves the endpoint is actually protected, not merely reachable: no token
+// at all must 401, the same way `/api/me` does.
+test('sse stream 401s with no token', async ({ request }) => {
+  const res = await request.get('/events/tick?n=5')
+  expect(res.status()).toBe(401)
 })

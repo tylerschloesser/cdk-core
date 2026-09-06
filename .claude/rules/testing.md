@@ -22,16 +22,26 @@ vitest file may open a socket, read AWS credentials, or need a build; an SSM
 fine, but nothing may *depend* on the real value.
 
 **Playwright** (`e2e/`, run by `pnpm e2e`) covers everything that is only true when the whole
-thing is wired together. **One config, two targets** is the design and it is not negotiable:
+thing is wired together. **One config, three targets** is the design and it is not negotiable:
 
 ```
 pnpm e2e                                                     # boots `pnpm dev` and tests localhost
 PLAYWRIGHT_BASE_URL=https://pr-12.preview.cdk-core.ty.ler.dev pnpm e2e   # the identical specs
+PLAYWRIGHT_BASE_URL=https://cdk-core.ty.ler.dev pnpm e2e                 # what deploy.yml runs
 ```
 
-A spec that only passes against one of the two targets is a spec that proves nothing about a
-preview. Anything genuinely environment-specific (machine auth in Epoch 4) goes behind a
-fixture that keys off `PLAYWRIGHT_BASE_URL`, never behind a branch inside a `test()` body.
+A spec that only passes against local is a spec that proves nothing about a preview. Anything
+environment-specific goes behind the `machineAuth`/`authedPage` fixtures in `e2e/fixtures.ts`,
+or behind a `test.skip` keyed on the exported `TARGET` — never behind a branch inside a
+`test()` body.
+
+**[Epoch 4] The third target really is different, and not because of a gap.** `TARGET` is
+`local | preview | prod`, and **prod has no machine identity and cannot have one**: the prod
+pool has no native users and its only client's `ExplicitAuthFlows` is refresh-only, which *is*
+A7. So `machineAuth` throws against prod (loudly, rather than yielding a token that 401s twenty
+lines later), the authenticated specs skip there, and what production asserts instead is the
+**401** — that the endpoints are protected. The signed-in half of production is a human doing a
+Google login, recorded in `progress.md`.
 
 `@playwright/test` is a dependency of the `e2e` package, not of the root, so the browser
 install is `pnpm --filter e2e exec playwright install chromium` — a bare `pnpm exec playwright`
