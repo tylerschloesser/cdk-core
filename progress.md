@@ -509,13 +509,20 @@ aws budgets create-budget --account-id 063257577013 --region us-east-1 \
   --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"tyler.schloesser+aws-user@gmail.com"}]},{"Notification":{"NotificationType":"FORECASTED","ComparisonOperator":"GREATER_THAN","Threshold":100,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"tyler.schloesser+aws-user@gmail.com"}]}]'
 ```
 
-**The one acceptance line not yet green at the time of this entry: `gh workflow run
-cleanup.yml`.** Its first run failed (`Command "cdk-core" not found`, fixed by `14c39cc` — see
-deviation 4), and the fixed version cannot be dispatched from a branch: the deploy role's trust
-allows `ref:refs/heads/main` and `pull_request` and nothing else, so
+The last acceptance line, `gh workflow run cleanup.yml`, could only run after the handoff
+branch merged: its first run failed (`Command "cdk-core" not found`, fixed by `14c39cc` — see
+deviation 4), and the fixed version cannot be dispatched from a branch, because the deploy
+role's trust allows `ref:refs/heads/main` and `pull_request` and nothing else, so
 `gh workflow run cleanup.yml --ref epoch-3-handoff` is refused at
-`sts:AssumeRoleWithWebIdentity` — correct behaviour, not a bug. It is dispatched from `main`
-immediately after this branch merges, and the result is recorded in the follow-up commit.
+`sts:AssumeRoleWithWebIdentity` — correct behaviour, not a bug. Dispatched from `main` after
+the merge:
+
+```
+gh workflow run cleanup.yml
+  -> run 34066657618 success in 30 s, sweep output: (nothing to reconcile)
+```
+
+**Every line of the acceptance test is green.**
 
 ### Deviations from the plan
 
@@ -571,9 +578,6 @@ immediately after this branch merges, and the result is recorded in the follow-u
 
 ### Left undone / untested
 
-- **`cleanup.yml`'s dispatch from `main`** — see the acceptance section. Everything it runs was
-  proven locally, including under CI conditions (every `node_modules` and `dist` deleted, then
-  `pnpm install --frozen-lockfile`, then the bin resolving).
 - **Nothing has raced two PR deploys**, still. The KVS retry loop has still only met a fake
   client and a single-writer live store. Epoch 6 owns it.
 - **The sweeper has never actually deleted anything.** Every live run found either an open PR
@@ -657,3 +661,15 @@ AWS_PROFILE=admin aws cloudformation wait stack-delete-complete --region us-east
   ids, the deploy role ARN and GitHub's numeric owner/repo ids. Still not credentials, still
   world-readable — **the confirm asked for after Epoch 1 is still outstanding, and this epoch
   added to the pile.**
+
+### The merge
+
+Epoch 3 landed on `main` in two PRs, both squashed: **PR #3** (`ebc7cb5`) with the constructs,
+the sweeper and the workflows, and **PR #5** (`e1e46c3`) with the two workflow fixes, the
+README and this handoff. Both got a preview and both were torn down on merge. `deploy.yml` ran
+on each merge and deployed production; the final run, `34066566331`, is green and
+`https://cdk-core.ty.ler.dev/api/ping` answers `{"message":"pong"}`.
+
+Final state of the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
+`CdkCoreGithubOidc`, and **no** `CdkCore-pr-*`. KVS `{"Items": []}`, preview bucket empty, no
+open PRs. `main` is the base for Epoch 4's branch.
