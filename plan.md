@@ -2,17 +2,24 @@
 
 > ## Status — 2026-09-06
 >
-> **Epochs 0, 1 and 2 are complete.** The monorepo, the reference app, the local e2e suite and
-> CI exist and are green (Epoch 1, merged to `main`). **The preview topology is live and
-> proven**: `siteCertificate`, `PreviewSite` and `PreviewDeployment` build real resources, and
-> a PR-numbered stack deploys onto the shared preview distribution in **102 s**, serves assets,
-> a buffered API and a streaming SSE endpoint at `https://pr-<n>.preview.cdk-core.ty.ler.dev`,
-> and tears down completely in **62 s**. `CdkCoreShared` and `CdkCorePreview` are alive in the
-> account (≈ $0 idle); **no PR stack is alive**. `Site`, `GithubDeployRole`, all `auth` props
-> and every workflow are still Epoch 3+. `pnpm verify`, `pnpm dev` and `pnpm e2e` still need no
-> credentials. Epoch 2 merged to `main` as **PR #2** (merge commit `ccf576d`, CI run
-> `34063308975` green); `main` is the base for Epoch 3's branch. The next session runs
-> `/epoch 3`.
+> **Epochs 0, 1, 2 and 3 are complete.** `https://cdk-core.ty.ler.dev` is **live**, deployed by
+> `deploy.yml` on every push to `main`, serving assets with the hashed/unversioned cache split,
+> a buffered API and a streaming SSE endpoint. **Every PR on this repo gets a preview**: pushing
+> deploys `CdkCore-pr-<n>` onto the shared preview distribution, e2e runs against it, and a
+> sticky comment reports the URL and the timings; closing the PR tears it down; a daily
+> `cdk-core sweep` finds anything left. Every construct in the [Construct API](#construct-api)
+> now builds real resources — `siteCertificate`, `Site`, `PreviewSite`, `PreviewDeployment`,
+> `GithubDeployRole` — and only the `auth` props are still stubs (they warn at synth; Epoch 4).
+> Alive in the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`, `CdkCoreGithubOidc`,
+> and an account-wide $10/month budget. **No PR stack is alive.** `pnpm verify`, `pnpm dev` and
+> `pnpm e2e` still need no credentials. The next session runs `/epoch 4`.
+>
+> **Measured against the [acceptance criteria](#acceptance-criteria):** A1 met — preview
+> deploys of 95 s and 93 s for a new stack, 29 s and 33 s for a repeat, and 88 s from a real
+> `git push` to the sticky comment, against targets of 5 min and 3 min. A2 met — after both
+> throwaway PRs closed, zero stacks, zero KVS keys, zero `pr-*/` prefixes, and
+> `cdk-core sweep --dry-run` printed `(nothing to reconcile)` and exited 0. A6's unauthenticated
+> half stays met, now through production as well as a preview.
 >
 > Corrections made against measurement or a failing run, each marked **`[revised]`** in place:
 >
@@ -51,21 +58,54 @@
 >    prefix with `prune: true` fight over each other's files, and a second custom-resource
 >    invocation sits on the critical path of every push for a caching win a short-lived preview
 >    never collects. Everything is `public, max-age=0, must-revalidate` plus a
->    `/pr-<n>/*` invalidation. `Site` still needs the real split.
+>    `/pr-<n>/*` invalidation. `Site` got the real split in Epoch 3.
 > 9. **Architecture — the SPA fallback serves the shell, it does not append `index.html`.**
 >    Rewriting `/auth/callback` to `<path>/index.html` made every deep client route **403**
 >    (not 404: an OAC bucket policy grants `s3:GetObject` and not `s3:ListBucket`). Epoch 4
 >    would have hit this on its first Google login.
+> 10. **Construct API — `GithubDeployRoleProps` gained `ownerId` and `repoId`.** With only
+>    `repo` there is no way to build GitHub's immutable
+>    `repo:<owner>@<ownerId>/<name>@<repoId>:…` subject, and the alternative — a wildcard on the
+>    owner id — would trust any account that later takes the name, which is the exact thing the
+>    immutable form exists to prevent. Both forms are trusted when both ids are given.
+> 11. **Construct API — `distributionOverrides` really cannot replace the behaviors now.** It
+>    was spread *last* on `PreviewSite`, so it could replace anything, contradicting its own doc
+>    comment. `safeDistributionOverrides()` strips `defaultBehavior`, `additionalBehaviors`,
+>    `domainNames` and `certificate`; the rest is spread before them so `priceClass` and friends
+>    still win over the construct's defaults.
+> 12. **Epoch 3 — the sweep CLI is a bundled *CommonJS* artifact, and the package has a
+>    `prepare` script.** Two failures no unit test could reach. An ESM bundle of the AWS SDK
+>    clients builds clean and dies on the first call with `Dynamic require of "node:https" is
+>    not supported`. And `pnpm exec cdk-core sweep` in CI failed with `Command "cdk-core" not
+>    found`, because pnpm links a workspace bin only if the target exists **at install time**
+>    and re-installing afterwards does not repair it (`--force` included, all four combinations
+>    measured). See `.claude/rules/typescript-config.md`.
+> 13. **Epoch 3 — `pr-teardown.yml` needs `GH_REPO`.** With no checkout, `gh pr comment` has no
+>    git remote to infer the repository from and exits 1. Having no checkout is the point of
+>    that workflow, so the fix is the env var, not a checkout step.
+> 14. **Epoch 3 — the deploy role's IAM reads the KVS ARN and bucket name with
+>    `ssm.StringParameter.valueFromLookup`, so `infra/cdk.context.json` is committed.** A
+>    `valueForStringParameter` dynamic reference cannot appear inside an IAM resource ARN.
+> 15. **Epoch 3 — `CdkCoreSite` was created by hand first, then re-deployed by `deploy.yml`.**
+>    `workflow_dispatch` requires the workflow on the default branch, and a first CloudFront
+>    create is a four-minute round trip to discover a construct bug in. Both paths are green;
+>    the plan's ordering assumed the workflow could run before it was merged.
+> 16. **Epoch 3 — the deploy role trusts `refs/heads/main` and `pull_request` and nothing
+>    else**, so a `workflow_dispatch` from any other branch is refused at
+>    `sts:AssumeRoleWithWebIdentity`. Correct, and worth knowing before trying to test a
+>    workflow change from a branch.
 >
 > **Human actions owed before any epoch can finish** (see the epoch sections for when each is
-> needed): none for Epoch 3 beyond `aws sso login --profile admin`. Epoch 4 needs a Google
-> OAuth client. Epoch 5 needs `npm login`.
+> needed): none for Epoch 4 beyond `aws sso login --profile admin` **and a Google OAuth client**
+> (console-only; there is no API for creating one). Epoch 5 needs `npm login`.
 >
-> **One thing for the user to confirm (still outstanding after Epoch 2):** the repo is public
-> per Epoch 1's plan text, and `plan.md`, `CLAUDE.md`, `.claude/rules/cdk.md` and
-> `docs/spikes/` now carry the AWS account id, both hosted-zone ids, and the preview
-> distribution/bucket/KVS ids. Not credentials, but world-readable — say if that should change
-> before more account detail is committed.
+> **One thing for the user to confirm (outstanding since Epoch 1, and Epoch 3 added to it):**
+> the repo is public per Epoch 1's plan text, and `plan.md`, `progress.md`, `README.md`,
+> `CLAUDE.md`, `.claude/rules/cdk.md`, `docs/spikes/`, `infra/bin/app.ts` and now
+> `infra/cdk.context.json` carry the AWS account id, both hosted-zone ids, the preview
+> distribution/bucket/KVS ids, the deploy role ARN and GitHub's numeric owner/repo ids. Not
+> credentials, but world-readable — say if that should change before more account detail is
+> committed.
 
 ## How to use this document
 
@@ -612,7 +652,7 @@ export interface SiteProps extends SiteDomain {
   readonly auth?: AuthProps
   /** File globs that must never be cached hard. Default ['*.html', 'sw.js', 'manifest.webmanifest', 'registerSW.js', '__config.json']. */
   readonly unversioned?: string[]
-  /** Escape hatch merged into DistributionProps (priceClass, httpVersion, webAclId, logging, ...). Cannot replace behaviors. */
+  /** Escape hatch merged into DistributionProps (priceClass, httpVersion, webAclId, logging, ...). Cannot replace behaviors, domainNames or the certificate — [revised, Epoch 3] `safeDistributionOverrides()` strips those four keys, which is what makes this comment true. */
   readonly distributionOverrides?: Partial<cloudfront.DistributionProps>
   /** Extra behaviors the consumer owns entirely (must not collide with backends). */
   readonly additionalBehaviors?: Record<string, cloudfront.BehaviorOptions>
@@ -689,6 +729,13 @@ export interface GithubDeployRoleProps {
   readonly domain: string           // to scope KVS + bucket sweeper permissions via SSM lookups
   /** Default: import the account's existing provider. */
   readonly oidcProviderArn?: string
+  // [revised, Epoch 3] GitHub's numeric ids. With both, the immutable
+  // `repo:<owner>@<ownerId>/<name>@<repoId>:…` subject is trusted alongside the legacy
+  // `repo:<owner>/<name>:…` one. `repo` alone cannot build it, and the only alternative —
+  // a wildcard on the owner id — would trust whoever later takes the owner name, which is
+  // the exact thing the immutable form exists to prevent.
+  readonly ownerId?: string
+  readonly repoId?: string
 }
 export class GithubDeployRole extends Construct { readonly role: iam.Role }
 
@@ -705,6 +752,17 @@ export class GithubDeployRole extends Construct { readonly role: iam.Role }
 
 Notes on the abstraction:
 
+- **[revised, Epoch 3] What `Site` and `PreviewSite` share is code, not convention.** The
+  package also exports `backendBehavior()` and `safeDistributionOverrides()` (`src/behaviors.ts`),
+  `backendReadTimeoutSeconds()` (`src/backend.ts`) and `renderSpaSource()` (`src/router/spa.ts`).
+  They are exported rather than internal so a consumer building a third distribution shape gets
+  the same `ALL_VIEWER_EXCEPT_HOST_HEADER` + `compress: false` + unoverridable-origin behavior
+  the two constructs use. The refactor was proven to be a no-op: `cdk synth CdkCorePreview` is
+  byte-identical before and after it.
+- **[revised, Epoch 3] `Site`'s bucket is `RemovalPolicy.DESTROY` with `autoDeleteObjects`.**
+  It holds only build output, every byte reproducible from a deploy, and the epoch's Teardown
+  promises `cdk destroy CdkCoreSite` removes everything. A consumer whose bucket holds anything
+  else should pass their own via an escape hatch rather than inherit this.
 - **[revised, Epoch 2] Two small additions the implementation needed.** `PreviewSite` also
   exports `previewParameterPrefix(domain)` so `PreviewDeployment` and a consumer's sweeper
   derive the SSM namespace from one place instead of three string literals, and
@@ -950,6 +1008,27 @@ pnpm exec cdk-core sweep --dry-run ...              # same, locally with AWS_PRO
 Targets recorded in `progress.md`: push → preview comment ≤ 5 min first deploy, ≤ 3 min
 repeat; teardown workflow ≤ 2 min; sweeper dry-run finds nothing.
 
+**[revised, Epoch 3] Result: all of it passed, in a different order.** Two orderings in the
+list above are not runnable as written, and the reasons are worth keeping:
+`gh workflow run deploy.yml` needs the workflow on the **default branch**, so nothing in this
+list can run before the epoch's PR merges; and a first CloudFront create is a four-minute round
+trip, so `CdkCoreSite` was created **by hand** first (223.8 s) to keep construct bugs on a local
+loop, after which `deploy.yml` proved the workflow rather than the construct. What was measured:
+prod live and `pnpm e2e` green against it (**5 passed, 2 skipped**); `deploy.yml` green on both
+`push` (148 s) and `workflow_dispatch` (103 s); `pr-preview.yml` green four times, deploying a
+**new** PR stack in 95 s and 93 s and a **repeat** in 29 s and 33 s, with **88 s** from a real
+`git push` to the sticky comment; `scripts/verify-preview.sh` **7 passed, 0 failed** against
+both PR previews; `pr-teardown.yml` green in **14 s**, with the stack fully gone **86 s** after
+`gh pr close`, and `verify-preview.sh <n> --expect-absent` **7 passed**; and
+`cdk-core sweep --dry-run` printing `(nothing to reconcile)`, exit 0, with the KVS and the
+preview bucket confirmed empty. The IAM check the delegation asked for:
+`simulate-principal-policy` returns **implicitDeny** for `cloudformation:DeleteStack` on
+`YahnAppStack-prod`, `ThaiLerDevSiteStack`, `CDKToolkit` and even `CdkCoreSite`, and **allowed**
+only on `CdkCore-pr-*`. Full numbers and the budget command in `progress.md`.
+
+**[revised, Epoch 3] Five workflows, not "the three".** The section title undercounts its own
+deliverables list; `ci.yml` from Epoch 1 plus the four here.
+
 **Delegation.** Sonnet: `sweep` implementation + tests from the spec; the four workflows from
 yahn's/thai's (each checked with `actionlint`); `GithubDeployRole` from yahn's stack;
 README deploy section. Orchestrator: `Site` construct, the hand deploys (OIDC role, budget),
@@ -1106,14 +1185,14 @@ numbers in `progress.md` (the user adjusts the targets; these are proposals):
 
 | # | Criterion | Target | Proven by |
 | --- | --- | --- | --- |
-| A1 | PR preview reachable from push | ≤ 5 min first deploy, ≤ 3 min repeat (yahn: ~6 min) | `pr-preview.yml` timings in the sticky comment |
-| A2 | Teardown leaves zero billable resources | 0 stacks, 0 KVS keys, 0 `pr-*/` prefixes after close | `cdk-core sweep --dry-run` exits 0 with nothing to do |
+| A1 | PR preview reachable from push | ≤ 5 min first deploy, ≤ 3 min repeat (yahn: ~6 min) | **met, Epoch 3 [revised]**: new stack 95 s / 93 s, repeat 29 s / 33 s at the deploy step; **88 s** from a real `git push` to the sticky comment. Four observations, not a randomized study — the headroom is ~2x |
+| A2 | Teardown leaves zero billable resources | 0 stacks, 0 KVS keys, 0 `pr-*/` prefixes after close | **met, Epoch 3 [revised]**: after both throwaway PRs closed, `cdk-core sweep --dry-run` printed `(nothing to reconcile)` and exited 0, `list-keys` returned `{"Items": []}`, and the preview bucket was empty |
 | A3 | Onboarding cost | ≤ 60 non-import CDK lines for four stacks; ≤ 30 min of human actions | `scripts/count-consumer-cdk.sh`; the `new-site` skill's checklist |
 | A4 | Local dev | `pnpm dev` serves the SPA and `/api/ping` within 10 s; no credentials | **met, Epoch 1 [revised]**: 1.14 s warm / 2.85 s cold, medians of 7 interleaved samples |
 | A5 | Claude end-to-end | open → preview → authenticated e2e → verified, zero human steps | Epoch 5 run |
-| A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | **met unauthenticated, Epoch 2 [revised]**: 2004 ms of spread across 5 events through the preview distribution, `e2e/sse.spec.ts` green against `pr-1`. The "with auth" half is Epoch 4 |
+| A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | **met unauthenticated, Epochs 2–3 [revised]**: 2004 ms of spread across 5 events through the preview distribution, and **2040 ms through production**; `e2e/sse.spec.ts` green against `pr-1`, `pr-3`, `pr-4` and `cdk-core.ty.ler.dev`. The "with auth" half is Epoch 4 |
 | A7 | Machine auth absent from prod | prod client `ExplicitAuthFlows` = refresh only; prod pool has no native users; preview token → prod API 401 | Epoch 4 commands |
-| A8 | Sweeper | finds and removes a deliberately orphaned key, prefix, and stack (Epoch 6 or by hand in 3) | `cleanup.yml` run log |
+| A8 | Sweeper | finds and removes a deliberately orphaned key, prefix, and stack (Epoch 6 or by hand in 3) | **not met, still owed.** Epoch 3 built the sweeper and proved the *negative*: every live run found either an open PR (kept, correctly) or nothing. Its delete paths have only ever run against fakes |
 
 ## Cost guardrails
 
@@ -1209,7 +1288,10 @@ Ordered by how much of the plan they can invalidate. Each has an owner epoch.
    `ValidationException: Pre-Condition failed`.** The handler still retries on both candidates.
    A new hazard took its place and is also closed: the bundled handler must import
    `@aws-sdk/signature-v4a` or every KVS call fails.
-3. **KVS propagation delay** has no SLA (D2). `pr-preview.yml` polls up to 5 min.
+3. **KVS propagation delay** has no SLA (D2). `pr-preview.yml` polls up to 5 min. **[revised,
+   Epoch 3] The poll exists and is green**, but has never actually had to wait long: four
+   preview deploys answered `/api/ping` on the first or an early attempt. The delay is
+   unmeasured, not absent.
 4. ~~**URI-rewrite cache keys**~~ (D10). **[revised, Epoch 2] Closed — proven before anything
    depended on it**, with query strings excluded from the cache policy so the rewritten URI was
    the only differentiator.

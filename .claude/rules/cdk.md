@@ -5,14 +5,15 @@ paths:
   - "packages/cdk-core/src/preview-deployment.ts"
   - "packages/cdk-core/src/certificate.ts"
   - "packages/cdk-core/src/site.ts"
+  - "packages/cdk-core/src/behaviors.ts"
   - "packages/cdk-core/src/router/**"
-  - "packages/cdk-core/src/handlers/**"
-  - ".github/workflows/**"
 ---
 
 # CDK, CloudFront, and the preview topology
 
-Loaded when you touch `infra/`, a construct, the router, a handler, or a workflow.
+Loaded when you touch `infra/`, a construct or the router. Two neighbours: workflows, the
+deploy role and the sweeper are `.claude/rules/workflows.md`; the streaming contract and
+KeyValueStore writes are `.claude/rules/streaming-and-kvs.md`.
 
 Everything is **us-east-1** (CloudFront requires its ACM certificate there) in account
 `063257577013`. The `admin` profile has **no default region**: `env` is explicit in
@@ -120,45 +121,6 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
     the spike with query strings excluded from the cache policy: two `pr-<n>/` prefixes served
     the same viewer path with different bodies, both from cache. That is what makes one shared
     preview bucket safe. Do not switch to `originPath`.
-
-## Streaming
-
-`hono/aws-lambda`'s `streamHandle` → a function URL with `invokeMode: RESPONSE_STREAM` → a
-`CACHING_DISABLED`, `compress: false` behavior, with the router setting
-`timeouts.readTimeout` per backend.
-
-- **`RESPONSE_STREAM` is fixed when the function URL is created.** A buffered URL cannot be
-  promoted, only replaced. That is the whole reason `/events` is a second Lambda rather than a
-  route on the first.
-- **`readTimeout` is the real deadline, not the Lambda timeout.** CloudFront waits that long
-  for the first byte *and* between packets; 60 s is the ceiling without a quota increase, and
-  `renderRouterSource` defaults streaming backends to exactly 60. A producer that goes quiet
-  longer is cut off at the edge while the Lambda keeps running (and billing) — hence the
-  `: keepalive` every 10 s in `apps/api/src/events.ts`.
-- **CloudFront does not compress `text/event-stream` and does not buffer chunked responses.**
-  `compress: false` is set because it says what is meant, not because it measured faster.
-
-## KeyValueStore writes
-
-- **The ETag versions the whole store**, so two PR stacks deploying at once conflict even on
-  different keys. Every write is describe→`UpdateKeys` retried *as a unit*, re-describing each
-  attempt.
-- **A stale ETag returns `ValidationException: Pre-Condition failed during update of
-  Key-Value-Store`** — measured, not `ConflictException`. The handler retries on both anyway,
-  because the mapping is undocumented and could change.
-- **Deleting a key that does not exist succeeds** (measured: same ETag back, `ItemCount`
-  unchanged). So does a delete against a store that is gone, which the handler turns into
-  success explicitly — a stack delete must never wedge on cleanup.
-- **The bundled handler must import `@aws-sdk/signature-v4a` for its side effect.** The KVS
-  data-plane endpoint is global, so the client signs with SigV4A, and the AWS SDK ships no
-  SigV4A implementation — it looks one up in a registry that a separate package populates on
-  import. Bundled, that lookup finds nothing and *every* call fails at `describe` with
-  `Neither CRT nor JS SigV4a implementation is available`, taking the whole PR stack down.
-  `src/handlers/preview-resources.ts` carries the import with a comment saying it is not
-  unused; the package declares `sideEffects: true`, so esbuild keeps it.
-- Calling the KVS API needs SigV4A for the other reason too: a CI runner using the *global*
-  STS endpoint gets a v1 token that fails. That is why the writer is a Lambda-backed custom
-  resource and not a step in a workflow.
 
 ## Deleting things
 
