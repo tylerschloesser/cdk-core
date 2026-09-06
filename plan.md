@@ -12,7 +12,10 @@
 > `GithubDeployRole` — and only the `auth` props are still stubs (they warn at synth; Epoch 4).
 > Alive in the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`, `CdkCoreGithubOidc`,
 > and an account-wide $10/month budget. **No PR stack is alive.** `pnpm verify`, `pnpm dev` and
-> `pnpm e2e` still need no credentials. The next session runs `/epoch 4`.
+> `pnpm e2e` still need no credentials. Epoch 3 merged to `main` as **PR #3** (`ebc7cb5`) and
+> **PR #5** (`e1e46c3`), with `deploy.yml` green on each merge and `cleanup.yml` green from
+> `main` (run `34066657618`, `(nothing to reconcile)`); `main` is the base for Epoch 4's branch.
+> The next session runs `/epoch 4`.
 >
 > **Measured against the [acceptance criteria](#acceptance-criteria):** A1 met — preview
 > deploys of 95 s and 93 s for a new stack, 29 s and 33 s for a repeat, and 88 s from a real
