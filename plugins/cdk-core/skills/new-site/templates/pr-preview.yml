@@ -1,0 +1,128 @@
+# Deploys a per-PR preview stack and comments the preview URL, status and
+# timings on the PR.
+#
+# `concurrency.cancel-in-progress` is deliberately false: cancelling this job
+# does not cancel the CloudFormation deploy it started, and the next push
+# would then hit a stack stuck in UPDATE_IN_PROGRESS and fail. A new push just
+# queues behind the run already in flight for this PR — and pr-teardown.yml
+# shares this exact group name, so a close can never race a deploy for the
+# same PR either.
+#
+# Timings are a deliverable of this epoch (Epoch 3 measured a 102 s deploy and
+# a 62 s teardown by hand; this workflow reports both going forward without
+# anyone watching). `date +%s` around the deploy step and from job start to
+# the comment gives deploy time and push-to-comment latency without adding a
+# dependency.
+
+name: PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    # Fork PRs get no preview, and that is correct rather than a limitation:
+    # GitHub will not grant id-token: write to a workflow run triggered by a
+    # fork PR, so the deploy could not authenticate anyway.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Record job start
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: github-actions-pr-preview
+
+      - name: deploy
+        id: deploy
+        run: |
+          start=$(date +%s)
+          pnpm --filter infra exec cdk deploy "{{STACK_PREFIX}}-pr-$PR" --exclusively -c "pr=$PR" --require-approval never
+          end=$(date +%s)
+          echo "seconds=$((end - start))" >> "$GITHUB_OUTPUT"
+
+      # KVS writes for a new preview hostname reach the edge on no published
+      # SLA (AWS's own launch note says only "a few seconds"), so the stack
+      # being CREATE_COMPLETE does not mean the router at the edge already
+      # knows the hostname. Poll before handing the URL to Playwright.
+      - name: Wait for the preview to answer
+        run: |
+          set -euo pipefail
+          url="https://pr-$PR.preview.{{SITE_DOMAIN}}/api/ping"
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "$url" > /dev/null; then
+              echo "$url answered after $i attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "$url never answered"
+          exit 1
+
+      # `--filter e2e`, not a bare `pnpm exec`: @playwright/test is a
+      # dependency of the e2e package, not of the root, so the binary only
+      # resolves inside it.
+      - run: pnpm --filter e2e exec playwright install --with-deps chromium
+
+      - name: e2e
+        id: e2e
+        run: pnpm e2e
+        env:
+          PLAYWRIGHT_BASE_URL: https://pr-${{ github.event.pull_request.number }}.preview.{{SITE_DOMAIN}}
+
+      # `always()`, so a failing preview still tells the PR where to look.
+      - name: Comment preview URL
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NOW=$(date +%s)
+          TOTAL=$((NOW - JOB_START))
+          DEPLOY_SECONDS="${{ steps.deploy.outputs.seconds }}"
+
+          if [ "${{ steps.deploy.outcome }}" != "success" ]; then
+            STATUS="❌ deploy ${{ steps.deploy.outcome }} — the preview may not exist"
+          elif [ "${{ steps.e2e.outcome }}" = "success" ]; then
+            STATUS="✅ deployed and e2e passed"
+          else
+            STATUS="⚠️ deployed, but e2e ${{ steps.e2e.outcome }}"
+          fi
+
+          gh pr comment "$PR" --edit-last --create-if-none --body "$(cat <<EOF
+          ### PR Preview
+
+          $STATUS
+
+          - URL: https://pr-$PR.preview.{{SITE_DOMAIN}}
+          - Commit: ${{ github.event.pull_request.head.sha }}
+          - deploy ${DEPLOY_SECONDS} s · push → comment ${TOTAL} s
+          EOF
+          )"
