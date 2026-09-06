@@ -1,0 +1,1085 @@
+# cdk-core — shared CDK constructs and Claude skills for PR-previewed, Google-authed personal sites
+
+> ## Status — 2026-09-06
+>
+> **Epoch 0 (planning) is complete. No code, no AWS resources, no npm package exist yet.**
+> This file, `docs/prior-art.md`, `progress.md`, `CLAUDE.md`, and the `/epoch` + `/handoff`
+> skills are the whole repo. The next session runs `/epoch 1`.
+>
+> Nothing below has been corrected against a measurement yet. When something is, the
+> correction is marked **`[revised]`** with the reason, and the list below grows:
+>
+> 1. (none yet)
+>
+> **Human actions owed before any epoch can finish** (see the epoch sections for when each is
+> needed): none for Epoch 1. Epoch 2 needs `aws sso login --profile admin`. Epoch 4 needs a
+> Google OAuth client. Epoch 5 needs `npm login`.
+
+## How to use this document
+
+- **A fresh session executes exactly one epoch.** Start it with `/epoch <n>`; that skill loads
+  the Status block, `progress.md`, and the epoch's section. End it with `/handoff`, which
+  writes `progress.md`, corrects this file in place, and commits. See
+  [Session mechanism](#session-mechanism).
+- **Decisions are settled.** The [Decisions log](#decisions-log) records each with its
+  reasoning and the source that was checked. A session that disagrees implements as written
+  and records the disagreement in its handoff; the user re-decides, not the session.
+- **Everything derives from the [Construct API](#construct-api).** Review that first. If it
+  is wrong, nothing downstream is worth building.
+- Sections: [Context](#context) · [Decisions log](#decisions-log) ·
+  [Architecture](#architecture) · [Construct API](#construct-api) · [Epochs](#epochs) ·
+  [Acceptance criteria](#acceptance-criteria) · [Cost guardrails](#cost-guardrails) ·
+  [Delegation plan](#delegation-plan) · [Session mechanism](#session-mechanism) ·
+  [Risks and open questions](#risks-and-open-questions).
+
+## Context
+
+The user is a solo developer with several personal web apps (`thai.ler.dev`,
+`yahn.ty.ler.dev`, more to come), one AWS account, a personal GitHub, and heavy Claude
+assistance. Every site has the same shape: a Vite single-page app, one or more Hono-on-Lambda
+backends mounted by path, SSE streaming, and per-PR preview environments. Two sites already
+implement previews and have diverged; `docs/prior-art.md` compares them and is the basis for
+what is carried forward. The prompt that produced this plan is `prompt.md`.
+
+This repo (`/Users/tyler/repos/cdk-core`, GitHub `tylerschloesser/cdk-core` — not yet created)
+becomes a pnpm monorepo that publishes:
+
+1. **`@tylerschloesser/cdk-core`** on public npm: CDK constructs (`Site`, `PreviewSite`,
+   `PreviewDeployment`, `GithubDeployRole`, `siteCertificate`), a tiny runtime `auth` helper
+   for browser and server, a `cdk-core sweep` CLI for the orphan sweeper, and the bundled
+   Lambda handlers the constructs need.
+2. **A Claude Code plugin marketplace** at the repo root (`.claude-plugin/marketplace.json`)
+   with one plugin, `cdk-core`, whose skills teach a consumer repo's Claude how previews,
+   preview auth, and onboarding work.
+3. **A reference site**, `cdk-core.ty.ler.dev`, that consumes the package from the workspace,
+   dogfoods PR previews on this very repo, and carries the e2e suite that proves SSE and auth.
+
+### Verified environment (2026-09-06)
+
+| Fact | Value |
+| --- | --- |
+| AWS account / profile | `063257577013`, `admin` (SSO, **no default region** — pass `--region us-east-1`) |
+| CDK bootstrap | v30, qualifier `hnb659fds` |
+| Hosted zone `ty.ler.dev` | `Z038502736IM0QLQT7VFN` (records today: apex A, `yahn.ty.ler.dev` A/AAAA, ACM validation CNAMEs) |
+| Hosted zone `ler.dev` | `Z0635906RMEZ6PGB3D6I` (thai.ler.dev lives here) |
+| `cdk-core.ty.ler.dev` | free: no record, no cert, no distribution |
+| GitHub OIDC provider | exists account-wide (`arn:aws:iam::063257577013:oidc-provider/token.actions.githubusercontent.com`); **import, never create** |
+| CloudFront distributions | 6 in use of 200; **0 KeyValueStores**; **0 Cognito pools** |
+| Other production in this account | `ThaiLerDevSiteStack`, `YahnAppStack-prod`, `HaitianReliefServices`, `OrgHaitianRelief{Prod,Staging}`, `LerDev-Certificate` — never touch |
+| Tooling | node 22.18, pnpm 11.25, aws-cdk CLI 2.1140, aws-cdk-lib 2.268 (latest), gh 2.100 (logged in as `tylerschloesser`, token lacks `read:packages`), claude 2.1.263 |
+| npm | not logged in; `cdk-core` unscoped was unpublished in 2021 (avoid); `@tylerschloesser/cdk-core` free |
+| Prior-art timings | yahn full-clone preview: ~6 min create (CloudFront ~4), ~4 min destroy; thai frontend preview 4m44s |
+
+## Decisions log
+
+Each entry: the decision, why, and what was checked. Sources are in
+`docs/research/` (copied from the planning session's research) and `docs/prior-art.md`.
+
+### D1. CloudFront Functions can select the origin; Lambda@Edge is not needed
+
+**Decision.** Route previews with a viewer-request **CloudFront Function** (JS runtime 2.0)
+that reads the KeyValueStore and calls `cf.updateRequestOrigin()`. No Lambda@Edge anywhere.
+
+**Why.** Verified against the current CloudFront Developer Guide (`helper-functions-origin-
+modification.html`, fetched 2026-09-06): origin modification in CloudFront Functions launched
+2024-11-21; `updateRequestOrigin()` works on the viewer-request event only; "the origin set
+by the `updateRequestOrigin()` method can be any HTTP endpoint and doesn't need to be an
+existing origin within your CloudFront distribution"; settable fields include `domainName`,
+`originPath`, `customHeaders`, `customOriginConfig`, `timeouts.readTimeout` (1–120 s), and
+`originAccessControlConfig` with `originType` in `s3 | lambda | mediastore | mediapackagev2`.
+SST's production `Router` component uses exactly this call (source read from `sst/sst`
+`platform/src/components/aws/router.ts`). Cost: $0.10/M invocations + $0.03/M KVS reads,
+2M/month of each free; Lambda@Edge would be $0.60/M plus duration and only on cache misses.
+Constraints that shape the design: a function runs on every request; it cannot change which
+**cache behavior** was selected (behavior is chosen from the original URI before the function
+runs), so backend path patterns are fixed per distribution; it cannot read the body; there is
+no absolute time limit published, only a `ComputeUtilization` 0–100 metric; `Promise.all`
+over KVS reads is discouraged (memory) — use sequential `await`.
+
+**Open sub-question, spiked first in Epoch 2.** The doc's `originAccessControlConfig` prose
+calls itself "the unique identifier of an OAC" yet exposes no id field. Whether an inline
+`{enabled, signingBehavior: always, signingProtocol: sigv4, originType: lambda}` against a
+function URL that is *not* a configured origin actually signs correctly is undocumented.
+Fallback if it does not: function URL with `authType: NONE` plus a per-site secret header
+injected by the function via `customHeaders` and checked by the Lambda.
+
+### D2. KeyValueStore limits do not bound open PRs; ETag concurrency is store-wide
+
+**Decision.** One KVS per site, one key per preview hostname, JSON value under 1 KB. Writes go
+through a CDK custom resource with describe→write→retry-on-conflict.
+
+**Why.** Quotas (`cloudfront-limits.html`): key ≤ 512 B, value ≤ 1 KB, store ≤ 5 MB, ≤ 50
+keys or 3 MB per `UpdateKeys`, 1 KVS per function, 200 stores per account. No published
+max-keys; at ~250 B per entry the 5 MB store holds ~20k previews. `PutKey`/`UpdateKeys`/
+`DeleteKey` **require `If-Match: <ETag>`** from `DescribeKeyValueStore`; the ETag versions the
+**whole store**, so two PR deploys racing on different keys still conflict. Documented errors
+include `ConflictException` (409) and `ValidationException` (400); the exact code for an ETag
+mismatch is not stated, so the writer retries on both with jitter (SST's provider retries on
+`ValidationException` containing "Pre-Condition failed"). No write rate limit is published;
+API calls cost $1 per 1,000. `ListKeys` exists (page ≤ 50, returns values). Propagation to
+the edge is "a few seconds" (2023 launch blog; no SLA) — the deploy workflow polls the preview
+URL before running e2e. Calling the KVS API needs SigV4A; Lambda execution-role credentials
+are fine, but a CI runner using the *global* STS endpoint gets a v1 token that fails — the
+custom resource runs in Lambda precisely to avoid this.
+
+### D3. Registration: a CDK custom resource in the PR stack, plus a daily sweeper
+
+**Decision.** `PreviewDeployment` (in the PR stack) owns a Lambda-backed custom resource that
+writes the KVS key on Create/Update and deletes it on Delete. No registration API. The GitHub
+Action does nothing to KVS. A daily `cleanup.yml` runs `cdk-core sweep`, which reconciles
+three things against GitHub PR state: CloudFormation stacks with the PR prefix, KVS keys, and
+S3 prefixes in the preview bucket.
+
+**Why, versus the alternatives the prompt asked to compare.**
+- *Registration API* (a Lambda the PR stack calls): decoupled and cross-account capable, but a
+  second service to build, secure, version and monitor, and its teardown still depends on
+  someone calling it. Single account makes its main advantage moot. Rejected.
+- *Custom resource*: no new service; the KVS ARN and preview-distribution ARN are read from
+  SSM parameters the `PreviewSite` publishes; teardown is free with stack delete; IAM is one
+  `kvs:*` grant on one ARN. The resource's handler ships inside the npm package (bundled with
+  `@aws-sdk/client-cloudfront-keyvaluestore` + `signature-v4-multi-region`, not marked
+  external). This is what SST does. **Chosen.**
+- *GitHub Action step after `cdk deploy`*: simplest to write, but truth splits between CDK and
+  CI, and a cancelled workflow or force-deleted branch leaves the key behind with nothing to
+  notice. Rejected for writes; CI keeps the sweeper, where "is the PR closed?" is a GitHub
+  question anyway.
+
+**Failure cases the design must survive.**
+- *Two PR deploys land at once*: both custom resources describe the store, one `UpdateKeys`
+  wins, the other gets 409/400, re-describes, retries with 100–500 ms jitter, up to 10 times.
+- *Cancelled workflow*: CloudFormation keeps going (`cancel-in-progress: false`, same
+  concurrency group for deploy and teardown), so the stack ends `*_COMPLETE` or `ROLLBACK_*`;
+  on rollback the custom resource's Delete runs and removes the key. The sweeper covers the
+  rest.
+- *Force-deleted branch / PR closed while a deploy is in flight*: teardown waits in the same
+  concurrency group, then `delete-stack`. If the workflow never ran (GitHub outage, disabled
+  Actions), the daily sweeper finds a stack whose PR is closed and deletes it.
+- *Stack `DELETE_FAILED`* (e.g. the custom resource Lambda was already gone): the sweeper
+  retries `delete-stack`; if the key is still present with no stack, the sweeper deletes the
+  key and the `pr-<n>/` prefix directly. The sweeper exits non-zero if anything remains.
+- *Sweeper safety*: prefix + anchored `^[0-9]+$` on the stack name, `gh pr view` must return
+  `CLOSED` or `MERGED` (a lookup failure means "leave it"), and the deploy role's
+  `cloudformation:DeleteStack` is IAM-scoped to `stack/<prefix>-pr-*`. `--dry-run` prints
+  without deleting and is what the acceptance test uses.
+
+### D4. Cognito: one prod pool and one preview pool per site, one Google client for all sites
+
+**Decision.** `Site` creates a **prod user pool** (Essentials tier, Google as the only IdP, one
+app client with authorization-code + PKCE, `ExplicitAuthFlows` = `ALLOW_REFRESH_TOKEN_AUTH`
+only, callback `https://<site>/auth/callback`). `PreviewSite` creates a **separate preview
+user pool** for the site (Google IdP, one browser app client whose single callback is the
+bounce host, plus one `machine` app client with `ALLOW_USER_PASSWORD_AUTH`, plus one native
+user `claude` whose password lives in Secrets Manager). Both pools use the free Cognito
+**prefix domain** (`<slug>.auth.us-east-1.amazoncognito.com`), not a custom domain. All sites
+share **one Google OAuth client** whose redirect URIs are the pool domains' `/oauth2/idpresponse`.
+
+**Why.**
+- *Cost*: the Cognito free tier is 10,000 MAU **per account** (Lite and Essentials), not per
+  pool; a pool costs nothing to exist; prefix domains are free. Per-site pools are cost-neutral.
+- *Why a separate preview pool rather than app clients in one pool*: the prompt's "overlap"
+  question has two halves. A shared **directory** is fine and even desirable (same Google
+  users). **Token audience** is the isolation that matters, and within one pool it is only a
+  convention: tokens from any app client share `iss` and signing keys, so only the verifier's
+  `aud`/`client_id` check separates them; forgetting it in one preview API would accept prod
+  tokens. A separate pool makes the prod verifier's `iss` check reject every preview token
+  structurally, and it is the only way to make the machine user *not exist* in prod.
+- *Why not per-PR app clients*: they need `UpdateUserPoolClient` from CI (read-modify-write of
+  the whole client, `ConcurrentModificationException` under races) and are capped at 100
+  callbacks; the bounce (D5) needs none of that.
+- *Why not groups / custom claims to namespace PR users*: `cognito:groups` and pre-token
+  claims can tag a token but cannot stop the prod API from accepting it; they answer the
+  directory question, not the audience one.
+- *Why prefix domains*: **custom domains are capped at 4 per Region, non-adjustable**, and
+  each needs an A record on the parent, a us-east-1 cert, and up to an hour to propagate.
+  With `identity_provider=Google` on the authorize URL the user never sees the Cognito page,
+  so the domain is cosmetic. `Site` exposes `auth.customDomain` as an escape hatch for up to
+  four sites that want `auth.<site>`.
+- *Why one Google client*: there is **no API** to create Google OAuth clients (only IAP-locked
+  ones); each is manual console work, and Google counts unique second-level domains per
+  project (≤ 10) — all `amazoncognito.com` redirect URIs collapse to one. Onboarding a site is
+  then "add two redirect URIs to the existing client" (one minute) instead of a new project +
+  consent screen + client. The consent screen shows one app name for all sites; acceptable for
+  personal use. The client id/secret live once in Secrets Manager
+  (`cdk-core/google-oauth`, JSON `{clientId, clientSecret}`); `auth.googleSecretName` lets a
+  site bring its own. Consent screen stays in **Testing** (≤ 100 test users): with only
+  `openid email profile` the 7-day refresh expiry does not apply.
+- *Tier*: Essentials (the default since 2024-11-22). Classic hosted UI, not managed login v2,
+  because nothing is branded and the L2 support is simpler. Doc conflict noted: one AWS page
+  says social IdPs need managed login; the feature table says Lite+classic works. Essentials
+  sidesteps it.
+
+### D5. Shared callback: a fixed bounce host, `state` carries only the PR number
+
+**Decision.** Preview browser logins use `redirect_uri = https://oauth.preview.<site>/` on
+the preview pool's browser client. The **router CloudFront Function** handles that host: it
+parses `state`, which the app formats as `<nonce>.<pr-number>` (nonce = 128-bit base64url,
+PR = digits only), rebuilds `pr-<n>.preview.<site>`, checks the key **exists in KVS**, and
+302-redirects to `https://pr-<n>.preview.<site>/auth/callback?code=…&state=…`. The PR app
+verifies the nonce against `sessionStorage`, then exchanges the code with its PKCE verifier
+at the preview pool's `/oauth2/token` using the same `redirect_uri`. Prod uses
+`https://<site>/auth/callback` directly with `state = <nonce>`.
+
+**Why.** Cognito callbacks are exact-match, no wildcards (`CreateUserPoolClient` docs); Google
+only ever sees the pool domain, so Google is not the constraint the prompt assumed — Cognito's
+callback list is. RFC 9700 §4.11.1 (BCP 240, Jan 2025): "Clients MUST NOT expose open
+redirectors … clients should only redirect if the target URLs are allowed". Carrying **no
+URL** in `state` — only digits that are formatted into a fixed template — makes the redirect
+allowlisted by construction; the KVS existence check additionally refuses PRs that were never
+deployed. PKCE (S256, the only method Cognito accepts) binds the code to the browser that
+started the flow, so the code crossing one extra redirect is not exfiltrable. `state` must
+not be URL-encoded JSON (Cognito rule) — the dotted form avoids that. The bounce runs entirely
+in the CloudFront Function: no origin, no page, no server state.
+
+### D6. Machine auth: a preview-only native user, tokens seeded into `localStorage`
+
+**Decision.** `PreviewSite` creates, in the **preview pool only**: app client `machine`
+(`ALLOW_USER_PASSWORD_AUTH`, no hosted UI), native user `claude` (`AdminCreateUser` with
+`MessageAction: SUPPRESS`, `AdminSetUserPassword --permanent`), and a Secrets Manager secret
+`<site>/preview-machine-user` `{username, password, clientId, userPoolId}`. Claude obtains
+tokens with `cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH`, then either calls
+APIs with `x-id-token: <IdToken>` or seeds a browser: the app's own storage key
+`cdkcore:auth` (JSON `{idToken, accessToken, refreshToken, expiresAt}`) set via Playwright
+`addInitScript` before the first navigation.
+
+**Why.**
+- *Structurally impossible in prod*: the prod pool has no native users, its only client has
+  no password flow (`ExplicitAuthFlows` set explicitly — the default would allow SRP), and the
+  prod API verifies `iss` = prod pool. There is no flag to flip. Note the doc finding that
+  removing `COGNITO` from `SupportedIdentityProviders` is cosmetic; it is `ExplicitAuthFlows`
+  that gates SDK sign-in, so that is what is pinned.
+- *Why not client-credentials*: no user, no ID token, custom scopes only, billed per token
+  with no free tier, cannot drive a browser session. Right for service-to-service, wrong for
+  "drive the UI as a user".
+- *Why not a signed bypass*: it would be a second auth path in the API that has to be kept out
+  of prod by discipline.
+- *Why `localStorage` + header rather than a cookie session*: the API stays stateless (JWT
+  verified with `aws-jwt-verify`), the SSE reader is `fetch`-based (as in yahn) so it can send
+  the header, and nothing in the shared layer has to own sessions or storage. The key is our
+  own, not Amplify's internals, so it is stable. CloudFront strips `Authorization` on GET and
+  OAC overwrites it anyway, hence `x-id-token`.
+- *Scopes gotcha*: `InitiateAuth` access tokens carry only `aws.cognito.signin.user.admin`;
+  the API authorizes on the **ID token** (`sub`, `email`, `cognito:groups`), never on scopes.
+
+### D7. Package registry: public npm, scoped
+
+**Decision.** Publish `@tylerschloesser/cdk-core` to npmjs.org with `--access public`. Manual
+`npm publish` from a tagged commit in Epoch 5; GitHub Actions trusted publishing is a later
+option.
+
+**Why.** GitHub Packages needs a token with `read:packages` in every consumer's `.npmrc` and
+every CI job (the user's `gh` token lacks even that scope today), for no benefit on a public
+personal package. Public npm needs one `npm login` once. The unscoped name `cdk-core` was
+unpublished in 2021 and may be blocked; the scope is free and unambiguous.
+
+### D8. Session strategy: files + two skills, no harness
+
+**Decision.** `plan.md` (this file, corrected in place), `progress.md` (append-only log),
+`/epoch <n>` and `/handoff` skills in `.claude/skills/`, sonnet `implementer`/`verifier`
+agents, `CLAUDE.md` + `.claude/rules/`. No hooks, no custom loop. Details in
+[Session mechanism](#session-mechanism).
+
+**Why.** Every primitive needed exists today (verified against code.claude.com docs
+2026-09-06): skills with `disable-model-invocation`, `argument-hint`, `$0`, and `` !`cmd` ``
+injection; project agents with `model: sonnet`; `SessionStart`/`Stop` hooks; `claude -p`.
+The user already runs this shape by hand (a plan with a Status block and `[revised]`
+markers, per-epoch kickoff prompts in `~/.claude/plans/`); the skills make the kickoff and
+the handoff *generated from the plan* instead of hand-written, and keep everything in the
+repo. A `Stop` hook that blocks stopping until a handoff exists was considered and rejected
+for now: it fires on every turn, including a question mid-epoch, and the `/epoch` skill's
+last rule plus the acceptance check in `/handoff` cover the same ground without friction.
+The only thing built-ins cannot do is start the next session by themselves; a shell loop
+over `claude -p "/epoch n"` is the answer if that is ever wanted, and is left as an optional
+script because whether `-p` accepts a skill as its prompt is not documented.
+
+### D9. Hostname and certificate scheme
+
+**Decision.** Prod at `<site>` (e.g. `cdk-core.ty.ler.dev`). Previews at
+**`pr-<n>.preview.<site>`**, with the bounce host `oauth.preview.<site>`. One ACM certificate
+in us-east-1 with SANs `[<site>, *.preview.<site>]`, DNS-validated in the site's hosted zone.
+One wildcard alias record `*.preview.<site>` (A + AAAA) pointing at the preview distribution;
+the apex A/AAAA points at the prod distribution. Cognito uses prefix domains, so no
+`auth.<site>` record is needed (escape hatch adds `auth.<site>` as a third SAN).
+
+**Why.** A wildcard covers exactly one label, so `*.<site>` would not cover
+`pr-1.preview.<site>`, and `*.preview.<site>` is what the wildcard DNS record and the
+distribution's alternate-domain-name both match. Keeping previews one label below `preview`
+also keeps the preview wildcard from overlapping any other host on `<site>` (a wildcard alias
+would otherwise shadow, and CloudFront's cross-account alias rules would bite, the Cognito
+custom-domain distribution if it were ever added). Wildcard DNS removes the per-PR record and
+yahn's NXDOMAIN gate. The existing sites use `pr-<n>.<site>`; migration would move them one
+label, which is acceptable and out of scope.
+
+### D10. Assets are keyed by URI prefix, not by Host
+
+**Decision.** The router rewrites `request.uri` to `/pr-<n>/<uri>` (and `/pr-<n>/index.html`
+for extensionless paths) against **one shared preview bucket**; it does not use `originPath`
+and does not add `Host` to the cache key. Backends are `CACHING_DISABLED`.
+
+**Why.** CloudFront computes the cache key from the viewer request as modified by the
+viewer-request function; `originPath` is invisible to the cache key, so two PRs' `/index.html`
+would collide. `Host` in a cache policy is forwarded to the origin and breaks S3. A URI rewrite
+gives distinct cache keys, works with `distributionPaths: ['/pr-<n>/*']` invalidation, and
+lets `PreviewDeployment` be an S3 upload to a prefix (`retainOnDelete: false`,
+`prune` within the prefix) rather than a bucket per PR — the cheapest possible deploy and
+teardown, with the bucket's OAC policy shared.
+
+### D11. Environment config is a deployed `/__config.json`, not a build-time variable
+
+**Decision.** `Site` and `PreviewDeployment` write `__config.json`
+(`{site, mode: 'prod'|'preview'|'local', pr?, auth: {issuer, clientId, domain}}`) into the
+asset prefix. The browser helper fetches it. `pnpm dev` serves a local one with
+`mode: 'local'`.
+
+**Why.** The web bundle stays identical across prod, every preview, and local, so one build
+per CI run serves both the prod deploy and previews, and pool/client ids never have to be
+threaded through Vite env vars or CDK context.
+
+## Architecture
+
+### Stacks a consumer repo defines (the reference does exactly this)
+
+| Stack | Deployed by | Holds |
+| --- | --- | --- |
+| `<Prefix>Shared` | `deploy.yml` and by hand | the one ACM certificate (`siteCertificate`) |
+| `<Prefix>Site` | `deploy.yml` on push to `main` | `Site`: prod bucket, distribution, DNS apex, prod user pool, the prod backends' Lambdas (consumer-owned) |
+| `<Prefix>Preview` | `deploy.yml` (rarely changes) | `PreviewSite`: preview bucket, KVS, router function, preview distribution, wildcard DNS, preview user pool + machine user, SSM parameters |
+| `<Prefix>-pr-<n>` | `pr-preview.yml` per PR; deleted by `pr-teardown.yml`/sweeper | `PreviewDeployment` + the PR's backend Lambdas (consumer-owned); optional data (consumer-owned, `RemovalPolicy.DESTROY`) |
+| `<Prefix>GithubOidc` | **by hand, once** | `GithubDeployRole` |
+
+Stack knowledge stays in the consumer's `bin/app.ts`; the constructs never create stacks.
+
+### Request path for a preview
+
+```
+browser ──► pr-12.preview.site (wildcard A → preview distribution)
+            │
+            ├─ behavior "/api/*"  ──► router fn: kvs.get("pr-12.preview.site") → backends.api
+            │                          cf.updateRequestOrigin({domainName: <lambda url host>,
+            │                            customOriginConfig: {https}, originAccessControlConfig:
+            │                            {enabled, always, sigv4, originType: lambda},
+            │                            timeouts: {readTimeout: 60}})  ──► PR 12's Lambda URL
+            ├─ behavior "/events/*" ─► same, backends.events (RESPONSE_STREAM URL)
+            └─ default (S3) ─────────► router fn: request.uri = "/pr-12" + uri (SPA → /pr-12/index.html)
+                                       origin unchanged: shared preview bucket (OAC)
+
+browser ──► oauth.preview.site/?code=..&state=<nonce>.<12>
+            └─ router fn: validate digits, kvs.exists("pr-12.preview.site") → 302 to
+               https://pr-12.preview.site/auth/callback?code=..&state=..
+
+unknown host / missing key ──► router fn returns 404 "no such preview"
+```
+
+KVS key: the full hostname. Value (≤ 1 KB):
+
+```json
+{"v":1,"pr":12,"assets":"/pr-12","backends":{"api":"abc123.lambda-url.us-east-1.on.aws","events":"def456.lambda-url.us-east-1.on.aws"},"deployedAt":"2026-09-07T01:02:03Z"}
+```
+
+The router function's code is generated by `PreviewSite` from the backend definitions (path
+patterns, read timeouts) and the site domain, so it needs no per-request configuration beyond
+KVS. It is associated with every behavior. Budget: under 10 KB, sequential `await`s, no
+`Promise.all`.
+
+### Prod distribution
+
+Same shape as thai/yahn's `addSite`: S3 + OAC default behavior with the SPA-fallback function,
+one `additionalBehavior` per backend with `FunctionUrlOrigin.withOriginAccessControl`,
+`ALL_VIEWER_EXCEPT_HOST_HEADER`, the explicit `lambda:InvokeFunction` grant, two
+`BucketDeployment`s (hashed assets immutable + prune; HTML/unversioned `no-cache` + invalidation),
+apex A/AAAA. Backends default to `CACHING_DISABLED`; a consumer can pass a cache policy
+(yahn's origin-decides policy is offered as `CachePolicies.originDecides(scope)`).
+
+### SSE
+
+Proven shape from yahn, adopted verbatim: Hono `streamHandle` → function URL with
+`invokeMode: RESPONSE_STREAM` → behavior with `CACHING_DISABLED`, `compress: false`,
+`readTimeout: 60 s`; the producer emits a `: keepalive` comment at least every 15 s; the
+endpoint is a **GET** (a POST body under OAC needs a client-computed `x-amz-content-sha256`);
+the browser reads with `fetch` + a small SSE parser, not `EventSource`, so it can send
+`x-id-token`. CloudFront does not buffer chunked responses and does not compress
+`text/event-stream` (verified in the docs' compressible-type list). No
+`responseCompletionTimeout` is set anywhere. In previews the router sets the same
+`readTimeout` via `updateRequestOrigin.timeouts`. The e2e test asserts **inter-event arrival
+timing**, not just the final body.
+
+### Auth flow (browser)
+
+1. `auth/browser` fetches `/__config.json`; `mode: 'local'` shows a dev-login box that stores
+   `dev:<name>` as the token. Otherwise it builds the Cognito authorize URL with
+   `identity_provider=Google`, PKCE S256, `redirect_uri` per D5, `state` per D5, and stores
+   `{verifier, nonce}` in `sessionStorage`.
+2. Callback route `/auth/callback`: checks nonce, exchanges the code at
+   `https://<pool-domain>/oauth2/token`, stores tokens under `localStorage["cdkcore:auth"]`,
+   returns to the pre-login path.
+3. `apiFetch()` adds `x-id-token`, refreshes with the refresh token when < 5 min remain, and
+   computes `x-amz-content-sha256` for any request with a body.
+4. `auth/server` exports `createVerifier({ issuer, clientId })` (aws-jwt-verify, ID token,
+   single client id) and `getUser(c)` for Hono, plus `AUTH=local` mode that trusts
+   `x-id-token` starting with `dev:`. Lambda env never sets `AUTH=local`; the constructs set
+   `AUTH=cognito` with the pool's issuer and client id on the backend Lambdas' environment.
+
+### Local dev
+
+`pnpm dev` = Vite (`:5173`, proxies `/api` → `:3001`, `/events` → `:3002`, serves a local
+`/__config.json`) + `tsx watch` for each backend on its own port, mirroring the two behaviors.
+No credentials, no AWS SDK calls, no network beyond localhost. Target: first byte from Vite
+and `/api/ping` answering within 10 s of `pnpm dev`. Playwright with `PLAYWRIGHT_BASE_URL`
+unset boots `pnpm dev` itself; set it to a preview URL and the identical specs run there, with
+`PREVIEW_MACHINE_SECRET` (or the AWS profile) providing machine-auth tokens.
+
+### The sweeper (`cdk-core sweep`)
+
+```
+cdk-core sweep --site cdk-core.ty.ler.dev --stack-prefix CdkCore --repo tylerschloesser/cdk-core [--dry-run]
+```
+
+1. `cloudformation list-stacks` (non-deleted statuses) filtered to `^<prefix>-pr-(\d+)$`.
+2. For each: `gh pr view <n> --json state`; delete only on `CLOSED`/`MERGED`; on lookup error
+   leave it and report; `delete-stack` + wait; continue past failures; red exit at the end.
+3. `ListKeys` on the site's KVS (from SSM `/cdk-core/<site>/preview/kvsArn`): any
+   `pr-<n>.preview.<site>` whose stack does not exist **and** whose PR is closed → `DeleteKey`
+   (with ETag).
+4. `ListObjectsV2` with `Delimiter=/` on the preview bucket: any `pr-<n>/` prefix with no stack
+   and closed PR → delete objects.
+5. Print a table of what was found/deleted/left; `--dry-run` deletes nothing and exits 0 only
+   if nothing *would* be deleted.
+
+## Construct API
+
+Draft TypeScript for `@tylerschloesser/cdk-core`. Defaults and escape hatches are in the
+comments. This is the review surface; everything else is derived.
+
+```ts
+import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
+import type * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
+import type * as cognito from 'aws-cdk-lib/aws-cognito'
+import type * as lambda from 'aws-cdk-lib/aws-lambda'
+import type * as route53 from 'aws-cdk-lib/aws-route53'
+import type * as s3 from 'aws-cdk-lib/aws-s3'
+import type { Duration } from 'aws-cdk-lib'
+import type { Construct } from 'constructs'
+
+// ---------- shared ----------
+
+/** Where the site lives. Everything is derived from these two values. */
+export interface SiteDomain {
+  /** e.g. 'cdk-core.ty.ler.dev'. Previews are `pr-<n>.preview.<domain>`. */
+  readonly domain: string
+  /** The hosted zone that contains `domain`. Imported by the consumer, never created here. */
+  readonly zone: route53.IHostedZone
+}
+
+/** One ACM certificate covering `domain` and `*.preview.<domain>` (+ `auth.<domain>` if asked). Must be us-east-1. */
+export function siteCertificate(scope: Construct, id: string, props: SiteDomain & {
+  readonly includeAuthHost?: boolean // default false
+}): acm.Certificate
+
+/** A backend mounted by path. The same shape is used by Site and PreviewSite; only Site needs the origin. */
+export interface BackendProps {
+  /** CloudFront path pattern, e.g. '/api/*'. Must not overlap another backend or '/__config.json'. */
+  readonly pathPattern: string
+  /** Set when the Lambda URL is RESPONSE_STREAM. Forces compress:false, CACHING_DISABLED, readTimeout default 60s. */
+  readonly streaming?: boolean
+  /** Origin read timeout. Default 30s, or 60s when streaming. Max 120s without a quota increase. */
+  readonly readTimeout?: Duration
+  /** Default CachePolicy.CACHING_DISABLED. Ignored in previews (always disabled). */
+  readonly cachePolicy?: cloudfront.ICachePolicy
+  /** Default ALLOW_ALL. */
+  readonly allowedMethods?: cloudfront.AllowedMethods
+  /** Escape hatch: merged last into the behavior. Cannot replace `origin` or `functionAssociations`. */
+  readonly behaviorOverrides?: Partial<cloudfront.BehaviorOptions>
+}
+
+export interface AuthProps {
+  /** Secrets Manager secret name holding {clientId, clientSecret} for the Google OAuth client. Default 'cdk-core/google-oauth'. */
+  readonly googleSecretName?: string
+  /** Cognito domain prefix. Default: domain with dots → dashes (+ '-preview' for the preview pool). */
+  readonly domainPrefix?: string
+  /** Escape hatch: use `auth.<domain>` as a Cognito custom domain (max 4 per Region!). Needs the cert to include it. Default: prefix domain. */
+  readonly customDomainCertificate?: acm.ICertificate
+  /** Token lifetimes. Defaults: id/access 1h, refresh 30d. */
+  readonly idTokenValidity?: Duration
+  readonly refreshTokenValidity?: Duration
+  /** Escape hatch applied to the UserPool props. */
+  readonly userPoolOverrides?: Partial<cognito.UserPoolProps>
+}
+
+/** Env vars the constructs put on a backend Lambda so `auth/server` can verify tokens. */
+export interface AuthEnvironment {
+  readonly AUTH: 'cognito'
+  readonly AUTH_ISSUER: string
+  readonly AUTH_CLIENT_ID: string
+}
+
+// ---------- Site (prod) ----------
+
+export interface SiteProps extends SiteDomain {
+  readonly certificate: acm.ICertificate
+  /** Absolute path to the built SPA (e.g. apps/web/dist). Throws at synth if missing. */
+  readonly webDist: string
+  /** Backends keyed by a short id ('api', 'events'). Keys must match PreviewSite/PreviewDeployment. */
+  readonly backends: Record<string, BackendProps & { readonly functionUrl: lambda.IFunctionUrl }>
+  /** Omit for a public site with no user pool. */
+  readonly auth?: AuthProps
+  /** File globs that must never be cached hard. Default ['*.html', 'sw.js', 'manifest.webmanifest', 'registerSW.js', '__config.json']. */
+  readonly unversioned?: string[]
+  /** Escape hatch merged into DistributionProps (priceClass, httpVersion, webAclId, logging, ...). Cannot replace behaviors. */
+  readonly distributionOverrides?: Partial<cloudfront.DistributionProps>
+  /** Extra behaviors the consumer owns entirely (must not collide with backends). */
+  readonly additionalBehaviors?: Record<string, cloudfront.BehaviorOptions>
+}
+
+export class Site extends Construct {
+  readonly distribution: cloudfront.Distribution
+  readonly bucket: s3.Bucket
+  readonly url: string                              // https://<domain>
+  readonly userPool?: cognito.UserPool
+  readonly userPoolClient?: cognito.UserPoolClient
+  /** Env to spread onto each backend Lambda; empty object when `auth` is omitted. */
+  readonly authEnvironment: AuthEnvironment | Record<string, never>
+  constructor(scope: Construct, id: string, props: SiteProps)
+}
+
+// ---------- PreviewSite (shared, one per site) ----------
+
+export interface PreviewSiteProps extends SiteDomain {
+  readonly certificate: acm.ICertificate
+  /** Same keys as Site.backends; origins are dynamic so only the routing props are used. */
+  readonly backends: Record<string, BackendProps>
+  /** Omit for a site with no auth. When present, creates the preview pool, machine client, machine user and secret. */
+  readonly auth?: AuthProps
+  /** Machine user name. Default 'claude'. Secret: '<domain>/preview-machine-user'. */
+  readonly machineUserName?: string
+  /** SSM namespace for what PR stacks read. Default '/cdk-core/<domain>/preview'. */
+  readonly parameterPrefix?: string
+  readonly distributionOverrides?: Partial<cloudfront.DistributionProps>
+}
+
+export class PreviewSite extends Construct {
+  readonly distribution: cloudfront.Distribution
+  readonly bucket: s3.Bucket
+  readonly keyValueStore: cloudfront.KeyValueStore
+  readonly routerFunction: cloudfront.Function
+  readonly userPool?: cognito.UserPool
+  readonly machineUserSecret?: secretsmanager.ISecret
+  /** Published to SSM under parameterPrefix: distributionArn, distributionId, bucketName, kvsArn, authIssuer, authClientId, machineSecretArn. */
+  readonly parameterPrefix: string
+  constructor(scope: Construct, id: string, props: PreviewSiteProps)
+}
+
+// ---------- PreviewDeployment (one per PR, in the PR stack) ----------
+
+export interface PreviewDeploymentProps {
+  readonly domain: string
+  /** PR number. Validated /^[0-9]+$/ (the stack name is derived from it upstream, not here). */
+  readonly pr: number
+  readonly webDist: string
+  /** Same keys as PreviewSite.backends. Any IFunctionUrl works, including an imported production one. */
+  readonly backends: Record<string, lambda.IFunctionUrl>
+  /** Default '/cdk-core/<domain>/preview'. */
+  readonly parameterPrefix?: string
+  readonly unversioned?: string[]
+}
+
+export class PreviewDeployment extends Construct {
+  readonly hostname: string   // pr-<n>.preview.<domain>
+  readonly url: string        // https://pr-<n>.preview.<domain>
+  /** Env to spread onto each PR backend Lambda (AUTH=cognito, preview pool issuer/client) or {} when the site has no auth. */
+  readonly authEnvironment: AuthEnvironment | Record<string, never>
+  /** Tag every resource + the stack with cdk-core:pr=<n>; the consumer's stack name must be `<prefix>-pr-<n>`. */
+  constructor(scope: Construct, id: string, props: PreviewDeploymentProps)
+}
+
+// ---------- GithubDeployRole (by hand, once) ----------
+
+export interface GithubDeployRoleProps {
+  readonly repo: string             // 'tylerschloesser/cdk-core'
+  readonly roleName: string         // 'cdk-core-github-deploy'
+  /** Stack-name prefix; DeleteStack is scoped to `<stackPrefix>-pr-*`. */
+  readonly stackPrefix: string
+  readonly domain: string           // to scope KVS + bucket sweeper permissions via SSM lookups
+  /** Default: import the account's existing provider. */
+  readonly oidcProviderArn?: string
+}
+export class GithubDeployRole extends Construct { readonly role: iam.Role }
+
+// ---------- runtime subpaths ----------
+// '@tylerschloesser/cdk-core/auth/browser': loadConfig(), login(), handleCallback(), getToken(), logout(), apiFetch(), readSse()
+// '@tylerschloesser/cdk-core/auth/server':  createVerifier(env), getUser(c) for Hono, isLocalMode()
+// bin: 'cdk-core sweep ...'
+```
+
+Notes on the abstraction:
+
+- **Thin by construction.** `Site` and `PreviewSite` together are one distribution each, one
+  bucket each, one function, one KVS, DNS, and optionally one pool. Data storage, queues,
+  tables, secrets for the app: the consumer's own constructs, in its own stacks, passed in as
+  function URLs. The `backends` map is the only contract between the three constructs.
+- **Consumer-owned CloudFront logic** goes in `additionalBehaviors` (prod) and
+  `behaviorOverrides` (both). The limit the prompt anticipated: a consumer cannot attach its
+  own viewer-request function to a preview behavior, because the router owns that slot; it
+  can attach viewer-response functions and any origin-side config.
+- **What thai and yahn express today** is expressible: a backend pointing at an imported
+  production function URL (thai's frontend mode) is just `backends: { api: importedUrl }` in a
+  PR stack; yahn's origin-decides cache policy is a `cachePolicy` prop; both sites' two-Lambda
+  split is two entries in `backends`.
+- **Onboarding target**: four stacks, ~60 non-import lines of CDK. Measured in Epoch 5.
+
+## Epochs
+
+Each epoch is one fresh session. Every epoch section has the same parts: Goal, Deliverables,
+Files, Acceptance test (the exact command a later session runs to confirm this epoch held),
+Delegation (what goes to sonnet), Teardown (what AWS resources exist afterwards and how they
+go away), If blocked. Epoch numbers are stable; do not renumber when inserting work — add
+`Epoch 3b`.
+
+### Epoch 0 — Plan and session mechanism (done 2026-09-06, this file)
+
+Deliverables: `plan.md`, `docs/prior-art.md`, `docs/research/*.md`, `progress.md`,
+`CLAUDE.md`, `.claude/skills/{epoch,handoff}`, `.claude/agents/{implementer,verifier}`,
+`.claude/settings.json`, `.gitignore`. No AWS resources. Acceptance: `git log` shows the
+commit; `/epoch 1` in a fresh session prints the Epoch 1 section.
+
+### Epoch 1 — Monorepo, reference app, local dev, local e2e, CI
+
+**Goal.** A credential-free local loop that a later session can trust: `pnpm dev` up in under
+10 s, `pnpm verify` green, Playwright green locally, CI running the same on every PR. The
+package compiles but exports only types and stubs. Nothing touches AWS.
+
+**Deliverables.**
+- `pnpm-workspace.yaml` (`packages/*`, `apps/*`, `infra`, `e2e`) with a `catalog:` block;
+  root `package.json` scripts: `dev`, `build`, `typecheck`, `lint`, `test`, `e2e`, `verify`
+  (= lint + typecheck + test + build). `esbuild` as a **root** devDependency. TypeScript
+  `~6.0` (not 7 — see yahn's note about `@css-modules-kit`; the reference does not need CSS
+  Modules, so plain TS 6 + `verbatimModuleSyntax` + `erasableSyntaxOnly`). oxlint. No
+  formatter; no semicolons; single quotes.
+- `packages/cdk-core`: `package.json` (`name: @tylerschloesser/cdk-core`, `type: module`,
+  `exports: { ".": ..., "./auth/browser": ..., "./auth/server": ... }`, `bin: { "cdk-core": ... }`,
+  `peerDependencies: aws-cdk-lib ^2.268, constructs ^10`), `src/index.ts` exporting the
+  interfaces from the Construct API section with constructors that `throw new Error('not
+  implemented: Epoch 2')`, `src/auth/browser.ts` and `src/auth/server.ts` with the **local
+  mode** implemented (dev login, `dev:<name>` tokens, `apiFetch` with `x-id-token` and the
+  SHA-256 body hash, `readSse`), `src/bin/sweep.ts` stub. Build with `tsc` to `dist/`
+  (handlers get an esbuild step in Epoch 2). Vitest for `readSse` and the hash.
+- `apps/web`: Vite + React, routes `/` (hello, shows `__config.json` mode and the user),
+  `/auth/callback`, a "Ping" button (`GET /api/ping` → `pong`), an "Echo" form
+  (`POST /api/echo` with a body — exercises the body hash), a "Stream" button that reads
+  `GET /events/tick?n=5` (one SSE event per 500 ms) and renders each as it arrives. Dev
+  server serves `/__config.json` `{mode:'local'}` and proxies `/api`, `/events`.
+- `apps/api`: Hono; `createApiApp()` (`/api/ping`, `/api/echo`, `/api/me` requiring auth) and
+  `createEventsApp()` (`/events/tick` SSE with `: keepalive` comments every 10 s and an
+  `id:` per event); `src/server.ts` runs both on `:3001`/`:3002`; `src/lambda-api.ts`
+  (`handle`) and `src/lambda-events.ts` (`streamHandle`) entry points, unused until Epoch 2.
+- `e2e/` Playwright: `smoke.spec.ts` (page loads, mode shown), `api.spec.ts` (ping, echo),
+  `sse.spec.ts` (five events arrive with ≥ 400 ms between the 1st and 5th and the 2nd within
+  1.5 s of the 1st — timing, not just content), `auth.spec.ts` (dev login → `/api/me` shows
+  the user). One config, two targets (`PLAYWRIGHT_BASE_URL`), local target boots `pnpm dev`.
+- `.github/workflows/ci.yml` (verify + e2e, no AWS), the GitHub repo created
+  (`gh repo create tylerschloesser/cdk-core --public --source . --push`), branch protection
+  off (solo).
+- `README.md` (short, for people), `.claude/rules/typescript-config.md`, `.claude/rules/testing.md`.
+
+**Files.** Everything above; `plan.md` Status; `progress.md`.
+
+**Acceptance test.**
+```
+pnpm install && pnpm verify && pnpm e2e
+# and, timed:
+( pnpm dev & ) ; t0=$(date +%s); until curl -fsS localhost:5173 >/dev/null && curl -fsS localhost:3001/api/ping | grep -q pong; do sleep 0.5; done; echo "dev up in $(( $(date +%s) - t0 ))s"   # must print ≤ 10
+```
+CI green on a throwaway PR.
+
+**Delegation.** Sonnet `implementer` chunks (each with its check): workspace scaffold
+(`pnpm install` succeeds); `apps/api` (`curl :3001/api/ping`); `apps/web` (`pnpm build`
+succeeds, `vite preview` shows the page); `readSse` + hash unit tests (`pnpm test`); each
+Playwright spec (`pnpm e2e e2e/<file>`); `ci.yml` (`actionlint` or a green run). Orchestrator
+owns: package `exports` layout, the Construct API stubs, the SSE timing assertion, repo
+creation, the handoff.
+
+**Teardown.** No AWS resources.
+
+**If blocked.** TypeScript 6 vs 7 tooling churn: pin to what `thai.ler.dev` pins. Playwright
+browsers: `pnpm exec playwright install chromium`. If `gh repo create` needs a scope, ask the
+user to run `! gh auth refresh -s repo`.
+
+### Epoch 2 — Preview topology: `PreviewSite`, `PreviewDeployment`, the routing spike
+
+**Goal.** A PR-numbered stack deploys in minutes onto a shared preview distribution and is
+reachable at `https://pr-<n>.preview.cdk-core.ty.ler.dev` with assets, a buffered API, a
+streaming SSE endpoint, and clean teardown. No auth yet (backends run with `AUTH=none`,
+`/api/me` returns 401 — and the machine-user pieces are Epoch 4).
+
+**Order matters.** Do the spike before writing constructs:
+1. By hand (CLI/console is fine, but record commands in `docs/spikes/2026-xx-oac-spike.md`):
+   a KVS, a JS 2.0 function that `updateRequestOrigin`s to a `RESPONSE_STREAM` function URL
+   with `AuthType: AWS_IAM` and inline `originAccessControlConfig{originType: lambda}`, both
+   `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` granted to `cloudfront.amazonaws.com`
+   with the distribution `SourceArn`. Prove `curl -N` streams. If it 403s, try the D1 fallback
+   (`AuthType: NONE` + `customHeaders` secret). Write the result into D1 as `[revised]`.
+2. Prove the URI-rewrite cache-key claim (D10): two prefixes, same path, different bodies,
+   no cross-contamination after a warm hit.
+3. Then build the constructs.
+
+**Deliverables.**
+- `siteCertificate`, `PreviewSite`, `PreviewDeployment` implemented per the Construct API,
+  minus `auth` (props accepted, ignored with a synth-time warning until Epoch 4).
+- The router function source generated from backends (`src/router/render.ts` → string; unit
+  test that the output is < 10 KB and contains each path pattern), covering: unknown host →
+  404, bounce host (D5, minus the auth exchange it triggers — it is pure redirect logic and
+  can ship now), assets rewrite + SPA fallback, backend origin override with `readTimeout`.
+- The custom-resource handler `src/handlers/preview-resources.ts` bundled by esbuild into
+  `dist/handlers/preview-resources/index.js` (SDK clients bundled, not external), handling
+  `ResourceType: KvsRoute` (Create/Update: describe → `UpdateKeys` puts; Delete: describe →
+  `UpdateKeys` deletes; retry on `ConflictException`/`ValidationException` with 100–500 ms
+  jitter, ≤ 10 attempts; Delete of a missing key is success). A vitest with a fake client
+  covers the retry loop.
+- `PreviewDeployment`: `BucketDeployment` to `pr-<n>/` (`retainOnDelete: false`, `prune`
+  scoped, unversioned files `no-cache`, `__config.json` from `Source.jsonData`,
+  `distributionPaths: ['/pr-<n>/*']`), per-backend `CfnPermission`s scoped to the preview
+  distribution ARN, the `KvsRoute` custom resource, stack + resource tags `cdk-core:pr`.
+- `infra/` for the reference: `bin/app.ts` with `CdkCoreShared`, `CdkCorePreview`,
+  `CdkCore-pr-<n>` (context `pr`, validated), Lambdas via `NodejsFunction` (`NODEJS_22_X`,
+  arm64, `externalModules: ['@aws-sdk/*']`), the events URL `RESPONSE_STREAM`.
+- `scripts/verify-preview.sh <n>`: curls `/`, `/api/ping`, `/api/echo` (POST with hash),
+  `/events/tick?n=5` with `curl -N` and timestamps, and a nonexistent host expecting 404.
+- `.claude/rules/cdk.md` with the gotchas that bit (start from yahn's five).
+
+**Files.** `packages/cdk-core/src/{preview-site,preview-deployment,certificate,router,handlers}/**`,
+`packages/cdk-core/package.json` (build script), `infra/**`, `scripts/verify-preview.sh`,
+`docs/spikes/*.md`, `.claude/rules/cdk.md`, `plan.md`, `progress.md`.
+
+**Acceptance test.**
+```
+pnpm build && AWS_PROFILE=admin pnpm --filter infra exec cdk deploy CdkCoreShared CdkCorePreview --require-approval never
+AWS_PROFILE=admin pnpm --filter infra exec cdk deploy CdkCore-pr-1 -c pr=1 --require-approval never   # time it
+scripts/verify-preview.sh 1     # all checks pass; SSE shows 5 events ≥ 400 ms apart
+AWS_PROFILE=admin aws cloudformation delete-stack --region us-east-1 --stack-name CdkCore-pr-1 && aws cloudformation wait stack-delete-complete ...
+scripts/verify-preview.sh 1     # every check now fails with 404, and:
+AWS_PROFILE=admin aws cloudfront-keyvaluestore list-keys --kvs-arn "$(aws ssm get-parameter --name /cdk-core/cdk-core.ty.ler.dev/preview/kvsArn --query Parameter.Value --output text --region us-east-1)" --region us-east-1   # no pr-1 key
+AWS_PROFILE=admin aws s3 ls s3://<preview-bucket>/pr-1/ --region us-east-1   # empty
+```
+Record the PR-stack deploy time in `progress.md`; target ≤ 3 min for a first deploy.
+
+**Delegation.** Sonnet: router-source renderer + size test; handler retry loop + fake-client
+test; `verify-preview.sh`; `infra/bin/app.ts` scaffolding from the API; `cdk.md` first draft
+from yahn's. Orchestrator: the spike (all AWS), construct wiring, every deploy, the timing
+measurement, D1/D10 `[revised]` edits.
+
+**Teardown.** `CdkCore-pr-1` is deleted in the acceptance test. `CdkCorePreview` and
+`CdkCoreShared` stay (a distribution, a bucket, a KVS, a function, a cert, two DNS records:
+≈ $0 idle). To remove everything: `cdk destroy CdkCorePreview CdkCoreShared`. Write both
+commands into `progress.md`.
+
+**If blocked.** OAC via `updateRequestOrigin` fails → D1 fallback, `[revised]`. KVS write
+`AccessDenied` from Lambda → check the SigV4A/STS note in D2 and the handler's `region`
+config (`us-east-1`, KVS endpoint is global). Cache-key test fails → switch assets to a
+per-PR bucket (`PreviewDeployment` creates it, adds the OAC bucket policy for the preview
+distribution ARN) and `[revised]` D10. SSO expired → ask the user for `! aws sso login --profile admin`.
+
+### Epoch 3 — `Site` (prod), `GithubDeployRole`, the three workflows, the sweeper
+
+**Goal.** `https://cdk-core.ty.ler.dev` is live from `deploy.yml`; a real PR on this repo
+gets a preview, its e2e runs against it, closing it tears it down, and `cleanup.yml` finds
+nothing left. Still no auth.
+
+**Deliverables.**
+- `Site` per the Construct API (minus `auth`), sharing internals with `PreviewSite` where
+  identical (bucket deploy pair, SPA function, backend behavior factory). `CachePolicies.originDecides`.
+- `GithubDeployRole` (imports the OIDC provider; both `sub` forms; `sts:AssumeRole` on the
+  bootstrap roles; `cloudformation:ListStacks` on `*`; `DescribeStacks`/`DeleteStack` on
+  `stack/<prefix>-pr-*`; `ssm:GetParameter` on the site's prefix; KVS `DescribeKeyValueStore`/
+  `ListKeys`/`DeleteKey`/`UpdateKeys` on the KVS ARN; `s3:ListBucket`/`DeleteObject` on the
+  preview bucket). Deployed **by hand** as `CdkCoreGithubOidc`; repo variable
+  `AWS_DEPLOY_ROLE_ARN` set with `gh variable set`.
+- `cdk-core sweep` per the Architecture section, with `--dry-run`, unit-tested against fakes.
+- Workflows in `.github/workflows/`: `deploy.yml` (verify → e2e local → credentials → deploy
+  Shared, Preview, Site → wait `/api/ping` → e2e against prod), `pr-preview.yml`
+  (`opened|synchronize|reopened`, same-repo guard, build, deploy `CdkCore-pr-$PR
+  --exclusively -c pr=$PR`, poll `https://pr-$PR.preview.cdk-core.ty.ler.dev/api/ping` until
+  200 (KVS propagation), e2e with `PLAYWRIGHT_BASE_URL`, sticky comment with URL + status +
+  timings), `pr-teardown.yml` (`closed`, same concurrency group, look-before-comment,
+  `delete-stack` without wait), `cleanup.yml` (daily cron + dispatch, `pnpm exec cdk-core sweep`).
+  All `cancel-in-progress: false` except `ci.yml`.
+- Workflow templates copied into `plugins/cdk-core/skills/new-site/templates/` (Epoch 5 wires
+  the skill; the copies are made now so they cannot drift from the proven ones — a test greps
+  that they are identical modulo the site name).
+- A $10/month AWS Budget alarm with email (`aws budgets`), created by hand; command in `progress.md`.
+
+**Acceptance test.**
+```
+gh workflow run deploy.yml && gh run watch          # green; https://cdk-core.ty.ler.dev/api/ping → pong
+git checkout -b epoch-3-throwaway && git commit --allow-empty -m 'preview smoke' && gh pr create --fill
+gh run watch                                        # pr-preview green; comment shows URL; note "push → comment" time
+PLAYWRIGHT_BASE_URL=https://pr-<n>.preview.cdk-core.ty.ler.dev pnpm e2e      # green locally too
+gh pr close <n> && gh run watch                     # teardown green
+sleep 300; gh workflow run cleanup.yml && gh run watch                          # "nothing to delete", exit 0
+pnpm exec cdk-core sweep --dry-run ...              # same, locally with AWS_PROFILE=admin
+```
+Targets recorded in `progress.md`: push → preview comment ≤ 5 min first deploy, ≤ 3 min
+repeat; teardown workflow ≤ 2 min; sweeper dry-run finds nothing.
+
+**Delegation.** Sonnet: `sweep` implementation + tests from the spec; the four workflows from
+yahn's/thai's (each checked with `actionlint`); `GithubDeployRole` from yahn's stack;
+README deploy section. Orchestrator: `Site` construct, the hand deploys (OIDC role, budget),
+the throwaway PR, timings, the IAM `simulate-principal-policy` check that `DeleteStack` on
+`YahnAppStack-prod` and `ThaiLerDevSiteStack` is `implicitDeny` for the new role.
+
+**Teardown.** After this epoch the account holds `CdkCoreShared`, `CdkCorePreview`,
+`CdkCoreSite`, `CdkCoreGithubOidc` — all idle-free except CloudFront/S3 pennies. PR stacks
+are transient. Full removal: `cdk destroy CdkCoreSite CdkCorePreview CdkCoreShared CdkCoreGithubOidc`
+plus `gh variable delete AWS_DEPLOY_ROLE_ARN`.
+
+**If blocked.** `AccessDenied` in a workflow → the role, not the bootstrap roles; hand-redeploy
+`CdkCoreGithubOidc`. `pull_request` workflows only run from a PR whose merge ref contains
+them → base the throwaway PR on the epoch branch, as thai's rule says. Preview `/api/ping`
+never 200s within 5 min → check KVS key exists (`list-keys`), then function logs
+(CloudWatch `/aws/cloudfront/function/...`).
+
+### Epoch 4 — Auth: Cognito + Google, the bounce, machine login, authenticated e2e
+
+**Goal.** Google login works on prod and on a preview through the bounce; Claude can log
+into a preview without a browser or a Google account, then drive the UI with Playwright as
+that user, including an authenticated SSE stream. The prod stack contains no password path.
+
+**Human actions first (ask, do not invent).** (1) In Google Cloud console create one OAuth
+2.0 Web client (consent screen External/Testing, scopes `openid email profile`, authorized
+domain `amazoncognito.com`), add redirect URIs
+`https://cdk-core.auth.us-east-1.amazoncognito.com/oauth2/idpresponse` and
+`https://cdk-core-preview.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`, and add the
+user's Google account as a test user. (2) `aws secretsmanager create-secret --name
+cdk-core/google-oauth --secret-string '{"clientId":"...","clientSecret":"..."}' --region us-east-1`.
+Until both exist, build everything and stop before deploying.
+
+**Deliverables.**
+- `Site.auth`: `UserPool` (Essentials, self-sign-up off, email as username alias not needed),
+  `UserPoolIdentityProviderGoogle` reading the secret, `UserPoolDomain` prefix,
+  `UserPoolClient` (auth-code grant, scopes `openid email profile`, callback
+  `https://<domain>/auth/callback`, logout `https://<domain>/`, `supportedIdentityProviders:
+  [GOOGLE]`, `authFlows: {}` **explicitly**, no secret), `authEnvironment`.
+- `PreviewSite.auth`: preview pool with the same Google IdP, browser client with callback
+  `https://oauth.preview.<domain>/`, `machine` client with `authFlows: { userPassword: true }`,
+  the `PoolUser` custom-resource type in the existing handler (AdminCreateUser SUPPRESS +
+  AdminSetUserPassword permanent, password read from the secret at runtime, never in the
+  template), the secret `<domain>/preview-machine-user`, SSM params `authIssuer`,
+  `authClientId`, `machineSecretArn`. The prod pool is untouched by any of this.
+- `auth/browser` and `auth/server` real modes per Architecture; `__config.json` carries
+  `auth`; refresh; logout.
+- `apps/api` `/api/me` returns `{sub, email}`; `/events/tick` requires auth.
+- e2e: `auth.spec.ts` gains a preview path — a fixture that, when `PLAYWRIGHT_BASE_URL` is
+  set, reads the machine secret (`aws secretsmanager get-secret-value`, profile from env),
+  runs `initiate-auth`, and seeds `localStorage["cdkcore:auth"]` via `addInitScript`; then
+  asserts `/api/me` shows `claude@…` and the SSE stream delivers 5 timed events with the
+  token. A negative test: the same tokens against `https://cdk-core.ty.ler.dev/api/me` → 401.
+- `scripts/preview-login.sh <n>` printing a bearer-style `x-id-token` for `curl`.
+- `.claude/rules/auth.md`.
+
+**Acceptance test.**
+```
+gh pr create ... && gh run watch          # preview green including the auth spec
+scripts/preview-login.sh <n> | xargs -I{} curl -fsS -H 'x-id-token: {}' https://pr-<n>.preview.cdk-core.ty.ler.dev/api/me   # {"sub":..,"email":..}
+curl -sS -o /dev/null -w '%{http_code}\n' -H "x-id-token: $(scripts/preview-login.sh <n>)" https://cdk-core.ty.ler.dev/api/me   # 401
+aws cognito-idp describe-user-pool-client --user-pool-id <prod pool> --client-id <prod client> --query 'UserPoolClient.ExplicitAuthFlows'   # ["ALLOW_REFRESH_TOKEN_AUTH"]
+aws cognito-idp list-users --user-pool-id <prod pool> --query 'Users[?UserStatus!=`EXTERNAL_PROVIDER`]'   # []
+```
+And a manual check by the user: Google login on `https://cdk-core.ty.ler.dev` and on the PR
+preview both land back on the page signed in.
+
+**Delegation.** Sonnet: `auth/browser` PKCE + token storage from the spec (vitest with a
+fake token endpoint); `auth/server` verifier wrapper; the Playwright fixture; `auth.md`.
+Orchestrator: pool/client wiring (every flag above is load-bearing), the bounce state format,
+the `PoolUser` handler, all deploys, the negative tests, the human-action prompts.
+
+**Teardown.** Two user pools ($0 idle), one secret ($0.40/month), the Google secret
+($0.40/month). Both pools delete with their stacks; the secrets are named, not stack-owned,
+so `aws secretsmanager delete-secret --force-delete-without-recovery` is in `progress.md`.
+
+**If blocked.** Google redirect mismatch → the pool domain prefix must equal what was typed
+into Google; print both. Cognito `InvalidParameterException` on IdP creation → the secret
+JSON shape. Bounce loops → the nonce/PR parse in the router; test the function with
+`aws cloudfront test-function` (event JSON in `docs/spikes/`).
+
+### Epoch 5 — Publish, the plugin, the skills, onboarding proof, Claude end-to-end
+
+**Goal.** A new consumer repo could adopt cdk-core from npm and the plugin alone, and Claude
+can take a PR from open to verified-in-preview with no human step.
+
+**Human action.** `npm login` (once). Publishing itself is done by the session.
+
+**Deliverables.**
+- Package hygiene: `files`, `dist/` with handlers, `exports` map with types, `README.md` in
+  the package (install, the three constructs, the four-stack layout, the skills), version
+  `0.1.0`, `npm publish --access public`, git tag `v0.1.0`. Reference switches from
+  `workspace:*`? **No** — it stays on `workspace:*` so this repo dogfoods HEAD; a
+  `scripts/consumer-smoke.sh` creates a temp dir, installs the published version, and
+  synthesizes the four stacks from `templates/` to prove the tarball works.
+- `.claude-plugin/marketplace.json` (`name: tylerschloesser`, plugin `cdk-core` at
+  `./plugins/cdk-core`), `plugins/cdk-core/.claude-plugin/plugin.json`, skills:
+  - `preview` — how previews work (hostnames, timings, what a comment looks like), how to
+    open a PR and wait for it (`gh pr create`, `gh run watch`, poll `/api/ping`), how to run
+    e2e against it, how to read logs, how teardown and the sweeper behave, what never to do
+    (`delete-stack` on anything not `-pr-<n>`).
+  - `preview-auth` — the machine-auth path: secret name, `initiate-auth`, `x-id-token` for
+    curl, the Playwright `addInitScript` seed, the 5-failures lockout, and why none of it
+    works on prod.
+  - `new-site` — onboarding: the four stacks from `templates/*.ts`, the workflows from
+    `templates/workflows/`, `.claude/settings.json` snippet with `extraKnownMarketplaces` +
+    `enabledPlugins`, the human actions (OIDC stack by hand, repo variable, Google redirect
+    URIs, secrets), and the checklist to verify.
+  - `agents/` in the plugin: `implementer`, `verifier` (copies of this repo's).
+- This repo's `.claude/settings.json` gains `extraKnownMarketplaces`/`enabledPlugins` so the
+  repo tests its own plugin; the standalone `.claude/skills` stay (`epoch`, `handoff`).
+- Line count check: `scripts/count-consumer-cdk.sh` prints non-blank, non-import lines of
+  `infra/bin/app.ts` + `infra/lib/*.ts`; target ≤ 60 (record the number; if it is over, add a
+  `defineSiteStacks()` convenience and re-count, but keep the constructs primary).
+- The Claude end-to-end run: from a **fresh session in this repo with the plugin loaded**,
+  the prompt "Change the ping response to `pong!` and verify it in a PR preview" must result
+  in a PR, a green preview run, an authenticated e2e pass, and a comment linking the preview —
+  with the user doing nothing. Record the transcript summary in `progress.md`.
+
+**Acceptance test.**
+```
+npm view @tylerschloesser/cdk-core version        # 0.1.0
+scripts/consumer-smoke.sh                          # synth of 4 stacks from the tarball succeeds
+claude plugin validate ./plugins/cdk-core          # passes
+scripts/count-consumer-cdk.sh                      # ≤ 60
+# the end-to-end run above, verified by `gh pr view <n> --json state,comments`
+```
+
+**Delegation.** Sonnet: package README, skill bodies from this plan + rules (verifier checks
+every command in a skill actually runs), `consumer-smoke.sh`, `count-consumer-cdk.sh`,
+`marketplace.json`/`plugin.json`. Orchestrator: publish, the end-to-end run, the final Status
+block.
+
+**Teardown.** Nothing new in AWS. The npm version is permanent (unpublish window 72 h).
+
+**If blocked.** `npm publish` 403 → scope/2FA; ask the user. Plugin skills not showing →
+`/reload-plugins`, then `claude plugin validate`. The end-to-end run stalls on a permission
+prompt → note the exact tool call in `progress.md`; that is a finding about the skills, not a
+failure to hide.
+
+### Epoch 6 — Hardening and measurements (optional, after 5)
+
+Race two PR deploys and confirm both KVS keys land; cancel a workflow mid-deploy and confirm
+the sweeper's next run is clean; force-delete a branch; measure `ComputeUtilization` of the
+router at p99 and the added latency vs prod (interleaved samples, ≥ 30 pairs — yahn's lesson);
+consider trusted publishing for npm; decide whether `.claude/skills/{epoch,handoff}` become a
+second plugin in this marketplace (`epochs`) for other repos — recommendation recorded in D8:
+they are generic, and the marketplace already exists here, so a second plugin in this repo is
+cheaper than a separate repo until a third consumer appears.
+
+## Acceptance criteria
+
+Per-epoch tests are above. The overall bar, checked at the end of Epoch 5 and recorded with
+numbers in `progress.md` (the user adjusts the targets; these are proposals):
+
+| # | Criterion | Target | Proven by |
+| --- | --- | --- | --- |
+| A1 | PR preview reachable from push | ≤ 5 min first deploy, ≤ 3 min repeat (yahn: ~6 min) | `pr-preview.yml` timings in the sticky comment |
+| A2 | Teardown leaves zero billable resources | 0 stacks, 0 KVS keys, 0 `pr-*/` prefixes after close | `cdk-core sweep --dry-run` exits 0 with nothing to do |
+| A3 | Onboarding cost | ≤ 60 non-import CDK lines for four stacks; ≤ 30 min of human actions | `scripts/count-consumer-cdk.sh`; the `new-site` skill's checklist |
+| A4 | Local dev | `pnpm dev` serves the SPA and `/api/ping` within 10 s; no credentials | Epoch 1 timing command |
+| A5 | Claude end-to-end | open → preview → authenticated e2e → verified, zero human steps | Epoch 5 run |
+| A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | `e2e/sse.spec.ts` against a preview |
+| A7 | Machine auth absent from prod | prod client `ExplicitAuthFlows` = refresh only; prod pool has no native users; preview token → prod API 401 | Epoch 4 commands |
+| A8 | Sweeper | finds and removes a deliberately orphaned key, prefix, and stack (Epoch 6 or by hand in 3) | `cleanup.yml` run log |
+
+## Cost guardrails
+
+- **Nothing in this design has an idle cost above pennies.** Per site: two distributions, two
+  buckets, one KVS, one function, ≤ 2 pools, ≤ 3 secrets ($0.40/month each). The only way to
+  spend real money is leaked PR stacks whose Lambdas get traffic, or runaway streaming
+  (Lambda bills full duration even after the client disconnects — keep `/events` timeouts ≤ 5
+  min and keepalives cheap).
+- **Every AWS-creating epoch lists its teardown** and the handoff records the exact commands.
+  A session never ends with a `-pr-<n>` stack alive unless `progress.md` says so and why.
+- **Three layers against leaks**: `pr-teardown.yml` on close; the daily sweeper across stacks,
+  KVS and S3; the deploy role's IAM scope so neither can touch anything else. Plus the $10
+  budget alarm from Epoch 3.
+- **Never** `delete-stack`/`destroy` a name not just read back from `list-stacks`; the
+  account hosts three other production sites. `.claude/settings.json` does not allowlist any
+  destructive AWS call.
+- Previews use the **fake/no-op** variant of anything metered (no model calls in the reference).
+
+## Delegation plan
+
+The planning session was Fable; orchestrator sessions run Opus (`claude --model opus`, then
+`/epoch <n>`); grunt work goes to the sonnet agents in `.claude/agents/`. Subagents share no
+context, so every handoff is self-contained: file paths, the exact change, the one-line check.
+
+**Sonnet (`implementer` → `verifier`)**: scaffolding from a spec (workspace, package
+manifests, workflow YAML from a proven template), test writing (Playwright specs, vitest for
+pure functions), mechanical implementations with a fake to test against (KVS retry loop, SSE
+parser, PKCE helpers, the sweeper's reconciliation), docs and rule drafts, `actionlint`/lint/
+typecheck runs, read-heavy exploration that returns only a conclusion (e.g. "does the
+published tarball include `dist/handlers`?").
+
+**Opus orchestrator**: every decision that touches the Construct API or a `plan.md` claim;
+construct wiring (the props are load-bearing and the failure modes are silent 403s); every
+`cdk deploy`/`destroy`, every AWS CLI write, every measurement and the decision it feeds;
+review of the integrated diff; the handoff. The per-epoch sections name the split concretely.
+
+**Rules of thumb carried from thai/yahn**: don't delegate a chunk smaller than its handoff;
+verify a subagent's confident claim before building on it (yahn lost 60 lines to one);
+three samples are not a measurement — interleave and randomize, report a median and range.
+
+## Session mechanism
+
+**Recommendation (D8): files plus two skills, all built-in primitives, committed now.**
+
+What exists in this repo after Epoch 0:
+
+| Piece | Purpose |
+| --- | --- |
+| `plan.md` | The spec. Status block on top, corrected in place with `[revised]`. |
+| `progress.md` | Append-only log, one entry per epoch (or per stop), fixed heading format so `/epoch` can `tail` it. |
+| `.claude/skills/epoch/SKILL.md` | `/epoch <n>`: injects the Status block, the progress tail, git state, and the epoch's section via `` !`awk …` ``; states the session rules; ends by demanding `/handoff`. User-invoked only. |
+| `.claude/skills/handoff/SKILL.md` | `/handoff [blocked]`: run the acceptance test, append the progress entry, correct `plan.md`, update rules, commit, print `Next: …`. Model-invocable so the orchestrator runs it itself. |
+| `.claude/agents/{implementer,verifier}.md` | sonnet workers, same contract as thai/yahn. |
+| `CLAUDE.md`, `.claude/rules/*.md` | invariants; `paths`-scoped rules grow per epoch. |
+| `.claude/settings.json` | read-only allowlist; nothing destructive. |
+
+How an epoch runs: `claude --model opus` in this repo → `/epoch 3` → the session confirms
+Epoch 2's acceptance test still passes, plans chunks, delegates, deploys, measures → `/handoff`
+→ commit `Epoch 3 handoff: …` → reply ends with `Next: start a fresh session and run /epoch 4`.
+The next session needs nothing from the previous conversation.
+
+Why not more: a `Stop` hook that blocks stopping without a handoff would fire on every turn
+and get in the way of ordinary questions; a `SessionStart` hook injecting `progress.md` would
+duplicate what `/epoch` injects on demand; `claude -p "/epoch n"` in a shell loop is the
+unattended version and can be added as `scripts/run-epoch.sh` when wanted — it is not needed
+for the next session to work, which was the bootstrapping constraint. The mechanism is
+generic (nothing in the two skills knows about CDK); if it proves out, it becomes a second
+plugin in this repo's marketplace (Epoch 6 note), not a separate repo yet.
+
+## Repository layout (target after Epoch 5)
+
+```
+cdk-core/
+├── plan.md  progress.md  CLAUDE.md  prompt.md  README.md
+├── .claude/            skills/{epoch,handoff}  agents/  rules/  settings.json
+├── .claude-plugin/     marketplace.json
+├── plugins/cdk-core/   .claude-plugin/plugin.json  skills/{preview,preview-auth,new-site}  agents/
+├── packages/cdk-core/  src/{index,site,preview-site,preview-deployment,github-deploy-role,certificate}.ts
+│                       src/router/  src/handlers/  src/auth/{browser,server}.ts  src/bin/sweep.ts  dist/
+├── apps/web/  apps/api/  e2e/  infra/{bin,lib}/  scripts/  docs/{prior-art.md,research/,spikes/}
+└── .github/workflows/  ci.yml  deploy.yml  pr-preview.yml  pr-teardown.yml  cleanup.yml
+```
+
+## Risks and open questions
+
+Ordered by how much of the plan they can invalidate. Each has an owner epoch.
+
+1. **OAC on a dynamically selected Lambda URL origin** (D1, Epoch 2 spike). Fallback is
+   designed. If even the fallback fails, previews fall back to yahn's per-PR distribution
+   with the rest of this plan intact — a 4-minute cost, not a redesign.
+2. **KVS ETag mismatch error code** is inferred (D2). The handler retries on both candidates.
+3. **KVS propagation delay** has no SLA (D2). `pr-preview.yml` polls up to 5 min.
+4. **URI-rewrite cache keys** (D10) — proven in Epoch 2 step 2 before anything depends on it.
+5. **Lite vs Essentials for social IdPs** doc conflict (D4) — moot, Essentials chosen.
+6. **`state` size** is undocumented; ours is ~30 chars.
+7. **Preview e2e flakiness on cold Lambdas** — Playwright `expect.timeout` 15 s, and the
+   `/api/ping` poll warms the API Lambda before the suite.
+8. **Custom domains capped at 4/Region** (D4) — only if a site opts into `auth.<site>`.
+9. **`claude -p "/skill"`** undocumented (D8) — only affects the optional unattended loop.
+10. **Google consent screen in Testing** limits to 100 test users; publishing requires no
+    review for basic scopes (unverified) — irrelevant until a site has real users.

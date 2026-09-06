@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install)",
+      "Bash(pnpm verify)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm lint:fix)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm test)",
+      "Bash(pnpm build)",
+      "Bash(pnpm e2e:*)",
+      "Bash(pnpm dev)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)",
+      "Bash(aws sts get-caller-identity:*)",
+      "Bash(aws cloudformation describe-stacks:*)",
+      "Bash(aws cloudformation list-stacks:*)",
+      "Bash(aws cloudformation describe-stack-events:*)",
+      "Bash(aws cloudfront-keyvaluestore list-keys:*)",
+      "Bash(aws cloudfront-keyvaluestore describe-key-value-store:*)",
+      "Bash(aws ssm get-parameter:*)",
+      "Bash(aws iam simulate-principal-policy:*)",
+      "Bash(curl -fsS http://localhost:*)",
+      "Bash(curl -fsS https://cdk-core.ty.ler.dev/*)",
+      "Bash(curl -N https://*.preview.cdk-core.ty.ler.dev/*)",
+      "Bash(curl -fsS https://*.preview.cdk-core.ty.ler.dev/*)"
+    ]
+  }
+}
