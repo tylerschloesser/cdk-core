@@ -194,6 +194,25 @@ override the origin, the request fails loudly instead of silently reaching a rea
 took ~35 s here. CDK's `KeyValueStore` L2 handles the ordering, but any CLI or custom-resource
 path must poll `describe-key-value-store` for `READY` first.
 
+## Two KVS data-plane facts, measured against the spike store
+
+`plan.md` D2 inferred the ETag-mismatch error code and left "delete of a missing key" as an
+assumption the handler had to defend against. Both are now measured, against the real API:
+
+```
+$ aws cloudfront-keyvaluestore update-keys --if-match <current etag> --deletes '[{"Key":"pr-does-not-exist"}]'
+{ "ETag": "KV3UN6WX5RRO2AG", "ItemCount": 2, "TotalSizeInBytes": 190 }      # success, nothing changed
+
+$ aws cloudfront-keyvaluestore update-keys --if-match STALEETAG12345 --puts '[{"Key":"pr-3","Value":"{}"}]'
+An error occurred (ValidationException) ... Pre-Condition failed during update of Key-Value-Store
+```
+
+- **Deleting a key that does not exist succeeds.** The handler's Delete path needs no
+  pre-check, and a stack delete cannot wedge on a key someone already swept.
+- **A stale ETag is a `ValidationException`, not a `ConflictException`** — the wording matches
+  what SST retries on. The handler retries on both anyway, since the mapping is undocumented
+  and AWS is free to change it.
+
 ## Teardown
 
 All spike resources were deleted in the same session. For the record, the order that works

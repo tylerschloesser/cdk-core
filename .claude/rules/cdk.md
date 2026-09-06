@@ -109,7 +109,14 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
    on every request. CloudFront does no resolvability check at `CreateDistribution`, so this
    is legal, and it is chosen so that a router which fails to override the origin fails
    loudly instead of quietly reaching a real host.
-10. **The rewritten `request.uri` is part of the cache key; `originPath` is not.** Proven in
+10. **SPA fallback serves the shell, it does not append `index.html`.** An extensionless
+    path is a client route, so the router rewrites it to `<assets>/index.html` — rewriting it
+    to `<path>/index.html` makes every deep route 403. Not 404: an OAC bucket policy grants
+    `s3:GetObject` and not `s3:ListBucket`, so S3 answers a missing key `AccessDenied`. A
+    request for a genuinely missing *asset* still fails, which is the point of keying on the
+    extension. `test/router.test.ts` executes the generated source against real event objects
+    precisely because this bug passed every substring assertion.
+11. **The rewritten `request.uri` is part of the cache key; `originPath` is not.** Proven in
     the spike with query strings excluded from the cache policy: two `pr-<n>/` prefixes served
     the same viewer path with different bodies, both from cache. That is what makes one shared
     preview bucket safe. Do not switch to `originPath`.
@@ -142,9 +149,16 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
 - **Deleting a key that does not exist succeeds** (measured: same ETag back, `ItemCount`
   unchanged). So does a delete against a store that is gone, which the handler turns into
   success explicitly — a stack delete must never wedge on cleanup.
-- Calling the KVS API needs SigV4A. Lambda execution-role credentials are fine; a CI runner
-  using the *global* STS endpoint gets a v1 token that fails. That is why the writer is a
-  Lambda-backed custom resource and not a step in a workflow.
+- **The bundled handler must import `@aws-sdk/signature-v4a` for its side effect.** The KVS
+  data-plane endpoint is global, so the client signs with SigV4A, and the AWS SDK ships no
+  SigV4A implementation — it looks one up in a registry that a separate package populates on
+  import. Bundled, that lookup finds nothing and *every* call fails at `describe` with
+  `Neither CRT nor JS SigV4a implementation is available`, taking the whole PR stack down.
+  `src/handlers/preview-resources.ts` carries the import with a comment saying it is not
+  unused; the package declares `sideEffects: true`, so esbuild keeps it.
+- Calling the KVS API needs SigV4A for the other reason too: a CI runner using the *global*
+  STS endpoint gets a v1 token that fails. That is why the writer is a Lambda-backed custom
+  resource and not a step in a workflow.
 
 ## Deleting things
 
