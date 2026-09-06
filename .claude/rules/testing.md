@@ -29,6 +29,10 @@ A spec that only passes against one of the two targets is a spec that proves not
 preview. Anything genuinely environment-specific (machine auth in Epoch 4) goes behind a
 fixture that keys off `PLAYWRIGHT_BASE_URL`, never behind a branch inside a `test()` body.
 
+`@playwright/test` is a dependency of the `e2e` package, not of the root, so the browser
+install is `pnpm --filter e2e exec playwright install chromium` — a bare `pnpm exec playwright`
+from the root fails with "Command not found", which is exactly how CI found this.
+
 The local target's readiness URL is `http://localhost:5173/api/ping` — through Vite's proxy,
 so one poll proves both the static server and the API are up.
 

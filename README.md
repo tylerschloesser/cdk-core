@@ -13,6 +13,7 @@ came from.
 
 ```sh
 pnpm install
+pnpm --filter e2e exec playwright install chromium   # once, for `pnpm e2e`
 pnpm dev      # http://localhost:5173, API on :3001, SSE on :3002
 pnpm verify   # lint + typecheck + test + build
 pnpm e2e      # Playwright against the local stack

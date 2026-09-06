@@ -37,6 +37,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
 
-      - run: pnpm exec playwright install --with-deps chromium
+      # `--filter e2e`, not a bare `pnpm exec`: @playwright/test is a
+      # dependency of the e2e package, not of the root, so the binary only
+      # resolves inside it.
+      - run: pnpm --filter e2e exec playwright install --with-deps chromium
       - run: pnpm e2e
 
