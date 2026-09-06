@@ -21,6 +21,15 @@
  * of this file that ever ships or runs. A shebang here too would double up
  * with the banner (esbuild does not deduplicate) and make the bundle a
  * syntax error.
+ *
+ * The bundle is **CommonJS**, and `dist/bin/package.json` says
+ * `{"type":"commonjs"}` so Node reads it that way despite the package being
+ * `"type": "module"` — the same trick `dist/handlers/` uses, for the same
+ * reason. An ESM bundle of these clients builds fine and then dies on the
+ * first call with `Dynamic require of "node:https" is not supported`: the
+ * AWS SDK's CJS dependencies `require()` at runtime, and esbuild's ESM
+ * output has no `require` to give them. Nothing in the unit tests can catch
+ * that, because they never load the bundle.
  */
 
 import { sweep } from '../sweep/reconcile.js'

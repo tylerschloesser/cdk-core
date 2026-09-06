@@ -26,7 +26,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b && esbuild src/handlers/preview-resources.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handlers/preview-resources/index.js && echo '{\"type\":\"commonjs\"}' > dist/handlers/preview-resources/package.json && esbuild src/bin/sweep.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/bin/sweep.js --banner:js='#!/usr/bin/env node'",
+    "build": "tsc -b && esbuild src/handlers/preview-resources.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handlers/preview-resources/index.js && echo '{\"type\":\"commonjs\"}' > dist/handlers/preview-resources/package.json && esbuild src/bin/sweep.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/bin/sweep.js --banner:js='#!/usr/bin/env node' && echo '{\"type\":\"commonjs\"}' > dist/bin/package.json",
     "dev": "tsc -b --watch --preserveWatchOutput",
     "typecheck": "tsc -b tsconfig.test.json",
     "test": "vitest run"
