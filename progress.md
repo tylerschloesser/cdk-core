@@ -163,7 +163,8 @@ Budget was 10 s (A4). `node_modules` present in both; `pnpm install` is not in t
 
 ## Epoch 2 — Preview topology: `PreviewSite`, `PreviewDeployment`, the routing spike — 2026-09-06 — DONE
 
-Commits `4cee88d..b7d1521` on `epoch-2-preview-topology`.
+Commits `4cee88d..e408981` on `epoch-2-preview-topology`, opened as **PR #2** (not merged at
+handoff time). CI run `34063308975` green: `verify` plus `7 passed (9.4s)`.
 
 ### Shipped
 
