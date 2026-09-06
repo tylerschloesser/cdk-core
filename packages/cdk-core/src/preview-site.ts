@@ -29,6 +29,7 @@ import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
 import * as ssm from 'aws-cdk-lib/aws-ssm'
 import { Construct } from 'constructs'
 
+import { backendBehavior, safeDistributionOverrides } from './behaviors.js'
 import { renderRouterSource } from './router/render.js'
 import type { AuthProps, BackendProps, SiteDomain } from './types.js'
 
@@ -121,36 +122,33 @@ export class PreviewSite extends Construct {
       readTimeout: Duration.seconds(60),
     })
 
+    // The behavior shape itself is shared with `Site` — see `behaviors.ts` for
+    // why that is code and not a convention. What is preview-specific is the
+    // two arguments: the origin is a placeholder the router overrides per
+    // request, and caching is forced off whatever the prod site does, because
+    // one PR's API response must never be served to another PR and the router
+    // cannot vary the cache key by host.
     const additionalBehaviors: Record<string, cloudfront.BehaviorOptions> = {}
     for (const backend of Object.values(props.backends)) {
-      additionalBehaviors[backend.pathPattern] = {
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: backend.allowedMethods ?? cloudfront.AllowedMethods.ALLOW_ALL,
-        // Previews are always uncached, whatever the prod site does: a PR's
-        // API responses must never be served to another PR, and the router
-        // cannot vary the cache key by host.
-        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-        originRequestPolicy:
-          cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-        // Compression would defeat SSE. It is off for every backend, not just
-        // the streaming ones, because a buffered API gains nothing from it here.
-        compress: false,
-        ...backend.behaviorOverrides,
-        // Not overridable, and the doc comment on `behaviorOverrides` says so:
-        // the router owns the viewer-request slot, and the origin is chosen
-        // per request rather than configured here.
+      additionalBehaviors[backend.pathPattern] = backendBehavior(backend, {
         origin: placeholderOrigin,
         functionAssociations: routerAssociation,
-      }
+        forceCachingDisabled: true,
+      })
     }
 
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       comment: `cdk-core previews for ${props.domain}`,
-      certificate: props.certificate,
-      domainNames: [`*.preview.${props.domain}`],
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       enableIpv6: true,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+      // Spread before the behaviors, the domain names and the certificate, so
+      // it cannot replace them; `safeDistributionOverrides` strips those four
+      // keys so a consumer gets a compile-time-legal no-op rather than a
+      // distribution whose router is quietly gone.
+      ...safeDistributionOverrides(props.distributionOverrides),
+      certificate: props.certificate,
+      domainNames: [`*.preview.${props.domain}`],
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -160,7 +158,6 @@ export class PreviewSite extends Construct {
         functionAssociations: routerAssociation,
       },
       additionalBehaviors,
-      ...props.distributionOverrides,
     })
 
     // A single wildcard record for every preview, so opening a PR needs no DNS

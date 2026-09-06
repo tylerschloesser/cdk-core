@@ -12,10 +12,14 @@ Loaded when you touch a spec, a test, or a test config.
 
 ## Two suites, two jobs
 
-**vitest** (`packages/cdk-core/test/`, run by `pnpm test`) covers the pure pieces only: the
-SSE parser, the body hash, and — from Epoch 2 on — the router renderer and the KVS retry loop
-against a fake client. Nothing in a vitest file may open a socket, read AWS credentials, or
-need a build.
+**vitest** (`packages/cdk-core/test/`, run by `pnpm test`) covers the pure pieces: the SSE
+parser, the body hash, the router and SPA renderers, the KVS retry loop and the sweeper's
+reconciliation against fakes. **From Epoch 3 it also asserts synthesized CloudFormation**
+(`Template.fromStack` from `aws-cdk-lib/assertions`) for `Site` and `GithubDeployRole` — that
+is still pure, because `Template.fromStack` neither calls AWS nor needs a build. Nothing in a
+vitest file may open a socket, read AWS credentials, or need a build; an SSM
+`valueFromLookup` inside one resolves to CDK's `dummy-value-for-…` placeholder and that is
+fine, but nothing may *depend* on the real value.
 
 **Playwright** (`e2e/`, run by `pnpm e2e`) covers everything that is only true when the whole
 thing is wired together. **One config, two targets** is the design and it is not negotiable:
