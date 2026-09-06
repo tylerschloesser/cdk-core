@@ -30,8 +30,8 @@ Everything is **us-east-1** (CloudFront requires its ACM certificate there) in a
 | `CdkCoreShared` | `deploy.yml` and by hand | the one ACM certificate |
 | `CdkCorePreview` | `deploy.yml` (rarely changes) | `PreviewSite`: bucket, KVS, router function, distribution, wildcard DNS, SSM params |
 | `CdkCore-pr-<n>` | `pr-preview.yml` per PR | the PR's Lambdas + `PreviewDeployment` |
-| `CdkCoreSite` | `deploy.yml` on main | `Site` (Epoch 3) |
-| `CdkCoreGithubOidc` | **by hand, once** | `GithubDeployRole` (Epoch 3) |
+| `CdkCoreSite` | `deploy.yml` on main | `Site`: prod bucket, distribution, SPA function, apex DNS |
+| `CdkCoreGithubOidc` | **by hand, once** | `GithubDeployRole`; its `roleArn` is the `AWS_DEPLOY_ROLE_ARN` repo variable |
 
 - **PR stacks read SSM, not CloudFormation exports.** An `Fn::ImportValue` would make every
   open PR a dependent of `CdkCorePreview` — blocking changes to it and breaking

@@ -1,0 +1,83 @@
+# Deploys the shared, preview and site stacks on every push to main.
+#
+# `{{STACK_PREFIX}}GithubOidc` (the OIDC provider + the role this workflow assumes) is
+# never deployed here: a workflow cannot grant itself the trust it needs to
+# run in the first place — that stack is applied once, by hand, before this
+# workflow can authenticate at all.
+#
+# `pnpm e2e` runs twice, on purpose. The first run is local and needs no
+# credentials — it boots `pnpm dev` itself, so a build that is already broken
+# is caught before anything touches AWS or production traffic. The second run
+# is the same suite pointed at the live site after the deploy, because the
+# local run cannot see a CDK or DNS mistake. `cancel-in-progress: false`
+# because cancelling this job mid-deploy does not cancel the CloudFormation
+# update in flight, and the next push would then race a stack stuck
+# UPDATE_IN_PROGRESS.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+
+      # `--filter e2e`, not a bare `pnpm exec`: @playwright/test is a
+      # dependency of the e2e package, not of the root, so the binary only
+      # resolves inside it.
+      - run: pnpm --filter e2e exec playwright install --with-deps chromium
+      - run: pnpm e2e
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: github-actions-deploy
+
+      # `pnpm verify` already ran `pnpm build`, but `cdk deploy` re-synthesizes
+      # the app, and the constructs read apps/web/dist and
+      # packages/cdk-core/dist/handlers/ at synth time.
+      - run: pnpm --filter infra exec cdk deploy {{STACK_PREFIX}}Shared {{STACK_PREFIX}}Preview {{STACK_PREFIX}}Site --require-approval never
+
+      # A distribution reports UPDATE_COMPLETE before the edge has finished
+      # propagating, so give the site a chance to answer before Playwright
+      # spends its retries on a connection error.
+      - name: Wait for the site to answer
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 https://{{SITE_DOMAIN}}/api/ping > /dev/null; then
+              echo "answered after $i attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "https://{{SITE_DOMAIN}}/api/ping never answered"
+          exit 1
+
+      - run: pnpm e2e
+        env:
+          PLAYWRIGHT_BASE_URL: https://{{SITE_DOMAIN}}

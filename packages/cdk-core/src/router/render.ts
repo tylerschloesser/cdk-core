@@ -12,6 +12,7 @@
  * `cloudfront.Function` construct, not a construct itself.
  */
 
+import { backendReadTimeoutSeconds } from '../backend.js'
 import type { BackendProps } from '../types.js'
 
 export interface RouterSourceProps {
@@ -57,17 +58,6 @@ function derivePrefix(key: string, pathPattern: string): { prefix: string; match
   return { prefix: pathPattern.slice(0, -1), matchExact: false }
 }
 
-function deriveReadTimeoutSeconds(key: string, backend: BackendProps): number {
-  const seconds = backend.readTimeout ? backend.readTimeout.toSeconds() : backend.streaming ? 60 : 30
-  if (seconds < 1 || seconds > 120) {
-    throw new Error(
-      `backend '${key}': readTimeout must be between 1 and 120 seconds (CloudFront's documented ` +
-        `limit), got ${seconds}`,
-    )
-  }
-  return seconds
-}
-
 function renderBackendBlock(route: BackendRoute, index: number): string {
   const cond = route.matchExact
     ? `uri === ${JSON.stringify(route.prefix)}`
@@ -110,7 +100,7 @@ export function renderRouterSource(props: RouterSourceProps): string {
 
   const routes: BackendRoute[] = entries.map(([key, backend]) => {
     const { prefix, matchExact } = derivePrefix(key, backend.pathPattern)
-    const readTimeoutSeconds = deriveReadTimeoutSeconds(key, backend)
+    const readTimeoutSeconds = backendReadTimeoutSeconds(key, backend)
     return { key, prefix, matchExact, readTimeoutSeconds }
   })
 

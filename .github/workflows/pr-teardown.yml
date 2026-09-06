@@ -1,0 +1,76 @@
+# Tears down a PR's preview stack when the PR closes (merged or not).
+#
+# This follows thai's approach, not yahn's: no checkout, no install, no
+# build, no CDK. A raw `delete-stack` needs no synth, which matters because a
+# PR whose branch no longer builds still has to be torn down — `cdk destroy`
+# would fail to synthesize against it. The stack's own `autoDeleteObjects`
+# bucket helper and its `KvsRoute` custom resource (the thing that removes
+# this PR's hostname from the shared KeyValueStore) both run as part of the
+# stack delete regardless of how that delete was triggered, so nothing here
+# has to orchestrate them by hand. And not waiting on the delete keeps this
+# workflow inside the epoch's <= 2 minute target — there is nothing useful to
+# do with the wait anyway.
+#
+# `concurrency` uses the *same* group as pr-preview.yml on purpose, so a
+# teardown can never run concurrently with a deploy for the same PR —
+# whichever started first finishes before the other begins.
+
+name: PR Teardown
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  teardown:
+    # Same fork guard as pr-preview.yml: a fork PR never got a preview stack
+    # (it couldn't authenticate to create one), so there is nothing to tear
+    # down and no id-token to do it with anyway.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      STACK: CdkCore-pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: github-actions-pr-teardown
+
+      # Most closed PRs did have a preview, but not all (a PR closed before
+      # its first push, or one whose preview already failed to create). Look
+      # before commenting, so a no-op run does not claim it tore down a stack
+      # that never existed.
+      - id: stack
+        run: |
+          if aws cloudformation describe-stacks --region us-east-1 --stack-name "$STACK" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "$STACK does not exist"
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.stack.outputs.exists == 'true'
+        run: aws cloudformation delete-stack --region us-east-1 --stack-name "$STACK"
+
+      - if: steps.stack.outputs.exists == 'true'
+        name: Comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "$PR" --edit-last --create-if-none --body "$(cat <<EOF
+          ### PR Preview
+
+          🗑️ \`$STACK\` is deleting.
+          EOF
+          )"

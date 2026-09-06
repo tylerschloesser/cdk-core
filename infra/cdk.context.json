@@ -1,0 +1,4 @@
+{
+  "ssm:account=063257577013:parameterName=/cdk-core/cdk-core.ty.ler.dev/preview/kvsArn:region=us-east-1": "arn:aws:cloudfront::063257577013:key-value-store/c23e3678-4dea-4cf8-b6d2-1aa0b8e1f364",
+  "ssm:account=063257577013:parameterName=/cdk-core/cdk-core.ty.ler.dev/preview/bucketName:region=us-east-1": "cdkcorepreview-previewassets8b9f2052-z0r9uodmnime"
+}

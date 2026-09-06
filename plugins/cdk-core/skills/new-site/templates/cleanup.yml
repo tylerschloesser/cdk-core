@@ -1,0 +1,57 @@
+# Safety net for a PR teardown that failed, or raced an in-flight deploy.
+#
+# Unlike yahn's cleanup.yml, which reimplements the sweep in shell against
+# `aws cloudformation list-stacks` directly, this one runs the real
+# `cdk-core sweep` — the package this repo publishes has to prove its own
+# sweeper works, and a second, divergent implementation here would only drift
+# from it. That means this workflow needs the repo checked out and built
+# (the sweeper is `infra`'s dependency's bin, so `infra` has to resolve it),
+# which yahn's raw-CLI version does not.
+#
+# Nothing here decides which stacks are safe to touch — that is the
+# sweeper's job. The two things standing between this cron and every other
+# stack in the account are the sweeper's own anchored `^{{STACK_PREFIX}}-pr-[0-9]+$`
+# match and the deploy role's IAM scope, and neither lives in this file.
+
+name: Cleanup
+
+on:
+  schedule:
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The `cdk-core` bin is a bundled dist/ artifact, not source.
+      - run: pnpm --filter {{PACKAGE_NAME}} run build
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: github-actions-cleanup
+
+      # `infra` depends on {{PACKAGE_NAME}}, so its bin resolves
+      # there. GH_TOKEN is needed because the sweeper shells out to
+      # `gh pr view` to decide whether a PR is still open.
+      - run: pnpm --filter infra exec cdk-core sweep --site {{SITE_DOMAIN}} --stack-prefix {{STACK_PREFIX}} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -24,12 +24,25 @@ import * as route53 from 'aws-cdk-lib/aws-route53'
 import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs'
-import { siteCertificate, PreviewSite, PreviewDeployment } from '@tylerschloesser/cdk-core'
+import {
+  siteCertificate,
+  GithubDeployRole,
+  PreviewSite,
+  PreviewDeployment,
+  Site,
+} from '@tylerschloesser/cdk-core'
 
 const ENV = { account: '063257577013', region: 'us-east-1' }
 const DOMAIN = 'cdk-core.ty.ler.dev'
 const ZONE_NAME = 'ty.ler.dev'
 const ZONE_ID = 'Z038502736IM0QLQT7VFN'
+const REPO = 'tylerschloesser/cdk-core'
+// GitHub's numeric ids for `REPO`, from `gh api repos/<repo>`. They exist only
+// to build the immutable `sub` claim the OIDC trust policy also accepts; see
+// GithubDeployRole. Public information about a public repo.
+const REPO_OWNER_ID = '2300885'
+const REPO_ID = '1359473287'
+const STACK_PREFIX = 'CdkCore'
 
 function importZone(scope: Construct): route53.IHostedZone {
   return route53.HostedZone.fromHostedZoneAttributes(scope, 'Zone', {
@@ -50,6 +63,18 @@ class CdkCoreShared extends Stack {
   }
 }
 
+/**
+ * The routing half of the backends contract, shared by `CdkCoreSite` and
+ * `CdkCorePreview` so the two distributions cannot disagree about which path
+ * belongs to which backend. A CloudFront Function cannot change which cache
+ * behavior was selected, so these patterns are the contract `apps/web`'s
+ * fetches and Vite's dev proxy have to match as well.
+ */
+const BACKEND_ROUTING = {
+  api: { pathPattern: '/api/*' },
+  events: { pathPattern: '/events/*', streaming: true },
+} as const
+
 // ---------- CdkCorePreview ----------
 
 interface CdkCorePreviewProps extends StackProps {
@@ -64,19 +89,105 @@ class CdkCorePreview extends Stack {
       domain: DOMAIN,
       zone,
       certificate: props.certificate,
+      backends: BACKEND_ROUTING,
+    })
+  }
+}
+
+const API_ENTRY = fileURLToPath(new URL('../../apps/api/src/lambda-api.ts', import.meta.url))
+const EVENTS_ENTRY = fileURLToPath(new URL('../../apps/api/src/lambda-events.ts', import.meta.url))
+const WEB_DIST = fileURLToPath(new URL('../../apps/web/dist', import.meta.url))
+
+/**
+ * The two backend Lambdas, identical in a PR stack and in production — which
+ * is the point: a preview that ran different code would prove nothing about
+ * what `main` is going to do. `/events` is a second function rather than a
+ * route on the first only because `RESPONSE_STREAM` is fixed when a function
+ * URL is created and a buffered URL cannot be promoted to one.
+ */
+function backendFunctions(scope: Construct): {
+  api: lambda.IFunctionUrl
+  events: lambda.IFunctionUrl
+} {
+  const apiFn = new NodejsFunction(scope, 'ApiFn', {
+    entry: API_ENTRY,
+    runtime: lambda.Runtime.NODEJS_22_X,
+    architecture: lambda.Architecture.ARM_64,
+    handler: 'handler',
+    memorySize: 512,
+    timeout: Duration.seconds(30),
+    bundling: {
+      externalModules: ['@aws-sdk/*'],
+      minify: true,
+      sourceMap: false,
+    },
+  })
+  const eventsFn = new NodejsFunction(scope, 'EventsFn', {
+    entry: EVENTS_ENTRY,
+    runtime: lambda.Runtime.NODEJS_22_X,
+    architecture: lambda.Architecture.ARM_64,
+    handler: 'handler',
+    memorySize: 512,
+    timeout: Duration.seconds(120),
+    bundling: {
+      externalModules: ['@aws-sdk/*'],
+      minify: true,
+      sourceMap: false,
+    },
+  })
+  return {
+    api: apiFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM }),
+    events: eventsFn.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+      invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
+    }),
+  }
+}
+
+// ---------- CdkCoreSite ----------
+
+interface CdkCoreSiteProps extends StackProps {
+  readonly certificate: acm.ICertificate
+}
+
+class CdkCoreSite extends Stack {
+  constructor(scope: Construct, id: string, props: CdkCoreSiteProps) {
+    super(scope, id, props)
+    const zone = importZone(this)
+    const urls = backendFunctions(this)
+
+    const site = new Site(this, 'Site', {
+      domain: DOMAIN,
+      zone,
+      certificate: props.certificate,
+      webDist: WEB_DIST,
       backends: {
-        api: { pathPattern: '/api/*' },
-        events: { pathPattern: '/events/*', streaming: true },
+        api: { ...BACKEND_ROUTING.api, functionUrl: urls.api },
+        events: { ...BACKEND_ROUTING.events, functionUrl: urls.events },
       },
+    })
+
+    new CfnOutput(this, 'SiteUrl', { value: site.url })
+  }
+}
+
+// ---------- CdkCoreGithubOidc ----------
+
+class CdkCoreGithubOidc extends Stack {
+  constructor(scope: Construct, id: string, props?: StackProps) {
+    super(scope, id, props)
+    new GithubDeployRole(this, 'DeployRole', {
+      repo: REPO,
+      roleName: 'cdk-core-github-deploy',
+      stackPrefix: STACK_PREFIX,
+      domain: DOMAIN,
+      ownerId: REPO_OWNER_ID,
+      repoId: REPO_ID,
     })
   }
 }
 
 // ---------- CdkCore-pr-<n> ----------
-
-const API_ENTRY = fileURLToPath(new URL('../../apps/api/src/lambda-api.ts', import.meta.url))
-const EVENTS_ENTRY = fileURLToPath(new URL('../../apps/api/src/lambda-events.ts', import.meta.url))
-const WEB_DIST = fileURLToPath(new URL('../../apps/web/dist', import.meta.url))
 
 interface CdkCorePrProps extends StackProps {
   readonly pr: number
@@ -87,46 +198,13 @@ class CdkCorePr extends Stack {
     super(scope, id, props)
     const { pr } = props
 
-    const apiFn = new NodejsFunction(this, 'ApiFn', {
-      entry: API_ENTRY,
-      runtime: lambda.Runtime.NODEJS_22_X,
-      architecture: lambda.Architecture.ARM_64,
-      handler: 'handler',
-      memorySize: 512,
-      timeout: Duration.seconds(30),
-      bundling: {
-        externalModules: ['@aws-sdk/*'],
-        minify: true,
-        sourceMap: false,
-      },
-    })
-    const apiFnUrl = apiFn.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.AWS_IAM,
-    })
-
-    const eventsFn = new NodejsFunction(this, 'EventsFn', {
-      entry: EVENTS_ENTRY,
-      runtime: lambda.Runtime.NODEJS_22_X,
-      architecture: lambda.Architecture.ARM_64,
-      handler: 'handler',
-      memorySize: 512,
-      timeout: Duration.seconds(120),
-      bundling: {
-        externalModules: ['@aws-sdk/*'],
-        minify: true,
-        sourceMap: false,
-      },
-    })
-    const eventsFnUrl = eventsFn.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.AWS_IAM,
-      invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
-    })
+    const urls = backendFunctions(this)
 
     const deployment = new PreviewDeployment(this, 'Deployment', {
       domain: DOMAIN,
       pr,
       webDist: WEB_DIST,
-      backends: { api: apiFnUrl, events: eventsFnUrl },
+      backends: { api: urls.api, events: urls.events },
     })
 
     new CfnOutput(this, 'PreviewUrl', { value: deployment.url })
@@ -144,11 +222,21 @@ new CdkCorePreview(app, 'CdkCorePreview', {
   certificate: shared.certificate,
 })
 
+new CdkCoreSite(app, 'CdkCoreSite', {
+  env: ENV,
+  certificate: shared.certificate,
+})
+
+// Deployed by hand, once, and never by a workflow: this is the stack that
+// grants CI its credentials, so a workflow that deployed it would already have
+// to hold them.
+new CdkCoreGithubOidc(app, 'CdkCoreGithubOidc', { env: ENV })
+
 const prContext = app.node.tryGetContext('pr')
 if (prContext !== undefined) {
   const prValue = String(prContext)
   if (!/^[0-9]+$/.test(prValue)) {
     throw new Error(`invalid pr context value: ${prValue}`)
   }
-  new CdkCorePr(app, `CdkCore-pr-${prValue}`, { env: ENV, pr: Number(prValue) })
+  new CdkCorePr(app, `${STACK_PREFIX}-pr-${prValue}`, { env: ENV, pr: Number(prValue) })
 }
