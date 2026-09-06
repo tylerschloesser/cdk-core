@@ -2,12 +2,16 @@
 
 > ## Status — 2026-09-06
 >
-> **Epochs 0 and 1 are complete.** The monorepo, the reference app (`apps/web`, `apps/api`),
-> the local e2e suite and CI all exist and are green; the GitHub repo
-> `tylerschloesser/cdk-core` is created (public, no branch protection) and Epoch 1 is merged
-> to `main`. **No AWS resources and no npm package exist yet** — every construct in
-> `packages/cdk-core` is a typed stub whose constructor throws. `pnpm verify`, `pnpm dev` and
-> `pnpm e2e` need no credentials. The next session runs `/epoch 2`.
+> **Epochs 0, 1 and 2 are complete.** The monorepo, the reference app, the local e2e suite and
+> CI exist and are green (Epoch 1, merged to `main`). **The preview topology is live and
+> proven**: `siteCertificate`, `PreviewSite` and `PreviewDeployment` build real resources, and
+> a PR-numbered stack deploys onto the shared preview distribution in **102 s**, serves assets,
+> a buffered API and a streaming SSE endpoint at `https://pr-<n>.preview.cdk-core.ty.ler.dev`,
+> and tears down completely in **62 s**. `CdkCoreShared` and `CdkCorePreview` are alive in the
+> account (≈ $0 idle); **no PR stack is alive**. `Site`, `GithubDeployRole`, all `auth` props
+> and every workflow are still Epoch 3+. `pnpm verify`, `pnpm dev` and `pnpm e2e` still need no
+> credentials. Epoch 2 is **PR #2**, CI green (run `34063308975`), not yet merged — merge it
+> before starting Epoch 3, whose branch bases on `main`. The next session runs `/epoch 3`.
 >
 > Corrections made against measurement or a failing run, each marked **`[revised]`** in place:
 >
@@ -26,14 +30,41 @@
 > 4. **Construct API — `aws-cdk-lib` and `constructs` are *optional* peer dependencies, and
 >    `auth/server` types Hono structurally.** A consumer that only wants `auth/browser` must
 >    not have to install CDK, and the package must not pin a consumer's Hono major.
+> 5. **D1 — confirmed, no fallback needed.** An inline `originAccessControlConfig
+>    {originType:'lambda'}` on `cf.updateRequestOrigin()` does SigV4-sign a request to an
+>    `AWS_IAM` `RESPONSE_STREAM` function URL that is not an origin of the distribution.
+>    Proven by hand before any construct was written; the `AuthType: NONE` + secret-header plan
+>    B is dead. Two hard constraints came with it: **`await` may not appear inside a call's
+>    argument list** in `cloudfront-js-2.0` (a syntax error surfacing only as a 503 at the
+>    edge), and **both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` are required** —
+>    either alone is a 403, measured in both directions.
+> 6. **D10 — confirmed.** The rewritten `request.uri` is part of the cache key: two `pr-<n>/`
+>    prefixes served the same viewer path with different bodies, both from cache, with query
+>    strings excluded from the policy. One shared preview bucket; no per-PR bucket.
+> 7. **D2 — the ETag-mismatch code is `ValidationException`, and deleting a missing key
+>    succeeds.** Both were inferred; both are now measured. The handler still retries on
+>    `ConflictException` too, since the mapping is undocumented. Separately, the bundled
+>    handler **must import `@aws-sdk/signature-v4a`** or every KVS call fails at `describe` —
+>    D2's SigV4A note in its concrete form, and it broke the first PR-stack deploy.
+> 8. **Epoch 2 deliverables — one `BucketDeployment` for a preview, not two.** Two sharing a
+>    prefix with `prune: true` fight over each other's files, and a second custom-resource
+>    invocation sits on the critical path of every push for a caching win a short-lived preview
+>    never collects. Everything is `public, max-age=0, must-revalidate` plus a
+>    `/pr-<n>/*` invalidation. `Site` still needs the real split.
+> 9. **Architecture — the SPA fallback serves the shell, it does not append `index.html`.**
+>    Rewriting `/auth/callback` to `<path>/index.html` made every deep client route **403**
+>    (not 404: an OAC bucket policy grants `s3:GetObject` and not `s3:ListBucket`). Epoch 4
+>    would have hit this on its first Google login.
 >
 > **Human actions owed before any epoch can finish** (see the epoch sections for when each is
-> needed): none for Epoch 2 beyond `aws sso login --profile admin`. Epoch 4 needs a Google
+> needed): none for Epoch 3 beyond `aws sso login --profile admin`. Epoch 4 needs a Google
 > OAuth client. Epoch 5 needs `npm login`.
 >
-> **One thing for the user to confirm:** the repo is public per Epoch 1's plan text, and
-> `plan.md` + `CLAUDE.md` carry the AWS account id and both hosted-zone ids. Not credentials,
-> but now world-readable — say if that should change before more account detail is committed.
+> **One thing for the user to confirm (still outstanding after Epoch 2):** the repo is public
+> per Epoch 1's plan text, and `plan.md`, `CLAUDE.md`, `.claude/rules/cdk.md` and
+> `docs/spikes/` now carry the AWS account id, both hosted-zone ids, and the preview
+> distribution/bucket/KVS ids. Not credentials, but world-readable — say if that should change
+> before more account detail is committed.
 
 ## How to use this document
 
@@ -116,12 +147,27 @@ runs), so backend path patterns are fixed per distribution; it cannot read the b
 no absolute time limit published, only a `ComputeUtilization` 0–100 metric; `Promise.all`
 over KVS reads is discouraged (memory) — use sequential `await`.
 
-**Open sub-question, spiked first in Epoch 2.** The doc's `originAccessControlConfig` prose
-calls itself "the unique identifier of an OAC" yet exposes no id field. Whether an inline
-`{enabled, signingBehavior: always, signingProtocol: sigv4, originType: lambda}` against a
-function URL that is *not* a configured origin actually signs correctly is undocumented.
-Fallback if it does not: function URL with `authType: NONE` plus a per-site secret header
-injected by the function via `customHeaders` and checked by the Lambda.
+**[revised, Epoch 2] Resolved — it signs, and the fallback is dead.** The open sub-question
+was whether an inline `{enabled, signingBehavior: always, signingProtocol: sigv4, originType:
+lambda}` against a function URL that is *not* a configured origin actually signs. It does.
+Proven by hand against a throwaway distribution before any construct was written
+(`docs/spikes/2026-09-06-oac-routing-spike.md`): 5 SSE events streamed through at
+0/438/939/1440/1941 ms from an `AWS_IAM` `RESPONSE_STREAM` URL CloudFront had never been told
+about, and a POST body returned 200 with `x-amz-content-sha256` and 403 without it. The
+`authType: NONE` + secret-header fallback is **not** needed and is not implemented.
+
+Two constraints the spike added, both of which cost a debugging cycle and are now in
+`.claude/rules/cdk.md`:
+
+- **`await` may not appear inside a call's argument list.** `JSON.parse(await kvs.get(k))` —
+  the natural way to write it — fails to publish with `SyntaxError: await in arguments not
+  supported`. It is a *syntax* error, so the function never runs and every request through the
+  distribution returns `503 The CloudFront function ... is invalid or could not run` with no
+  detail at the edge. `aws cloudfront test-function` is the only thing that prints the real
+  message. Bind the awaited value to a variable first.
+- **Both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` must be granted.** Measured in
+  both directions with the baseline re-confirmed afterwards: either alone is a **403**, both is
+  a 200. There is no signal on the Lambda side — it is never invoked.
 
 ### D2. KeyValueStore limits do not bound open PRs; ETag concurrency is store-wide
 
@@ -134,13 +180,23 @@ max-keys; at ~250 B per entry the 5 MB store holds ~20k previews. `PutKey`/`Upda
 `DeleteKey` **require `If-Match: <ETag>`** from `DescribeKeyValueStore`; the ETag versions the
 **whole store**, so two PR deploys racing on different keys still conflict. Documented errors
 include `ConflictException` (409) and `ValidationException` (400); the exact code for an ETag
-mismatch is not stated, so the writer retries on both with jitter (SST's provider retries on
-`ValidationException` containing "Pre-Condition failed"). No write rate limit is published;
+mismatch was not stated. **[revised, Epoch 2] Measured: a stale ETag returns
+`ValidationException: Pre-Condition failed during update of Key-Value-Store`**, matching what
+SST retries on. The writer still retries on both, because the mapping is undocumented and AWS
+is free to change it. **Also measured: deleting a key that does not exist succeeds** (same ETag
+back, `ItemCount` unchanged), so the Delete path needs no pre-check and a stack delete cannot
+wedge on a key the sweeper already removed. No write rate limit is published;
 API calls cost $1 per 1,000. `ListKeys` exists (page ≤ 50, returns values). Propagation to
 the edge is "a few seconds" (2023 launch blog; no SLA) — the deploy workflow polls the preview
 URL before running e2e. Calling the KVS API needs SigV4A; Lambda execution-role credentials
 are fine, but a CI runner using the *global* STS endpoint gets a v1 token that fails — the
-custom resource runs in Lambda precisely to avoid this.
+custom resource runs in Lambda precisely to avoid this. **[revised, Epoch 2] SigV4A bites a
+second, sharper way: the AWS SDK ships no SigV4A implementation.** It looks one up in a
+registry that `@aws-sdk/signature-v4a` populates on import, and in a bundled handler that
+lookup finds nothing — every call dies at `describe` with `Neither CRT nor JS SigV4a
+implementation is available`, which is exactly how the first PR-stack deploy failed.
+`src/handlers/preview-resources.ts` carries a side-effect import of that package, documented at
+the import site as load-bearing so nobody removes it as unused.
 
 ### D3. Registration: a CDK custom resource in the PR stack, plus a daily sweeper
 
@@ -337,7 +393,10 @@ and does not add `Host` to the cache key. Backends are `CACHING_DISABLED`.
 
 **Why.** CloudFront computes the cache key from the viewer request as modified by the
 viewer-request function; `originPath` is invisible to the cache key, so two PRs' `/index.html`
-would collide. `Host` in a cache policy is forwarded to the origin and breaks S3. A URI rewrite
+would collide. **[revised, Epoch 2] Confirmed by measurement**, not inference: two `pr-<n>/`
+prefixes serving the same viewer path `/` returned different bodies, both `x-cache: Hit from
+cloudfront`, with query strings excluded from the cache policy so the rewritten URI was the
+only differentiator. The per-PR-bucket fallback is not needed. `Host` in a cache policy is forwarded to the origin and breaks S3. A URI rewrite
 gives distinct cache keys, works with `distributionPaths: ['/pr-<n>/*']` invalidation, and
 lets `PreviewDeployment` be an S3 upload to a prefix (`retainOnDelete: false`,
 `prune` within the prefix) rather than a bucket per PR — the cheapest possible deploy and
@@ -379,7 +438,8 @@ browser ──► pr-12.preview.site (wildcard A → preview distribution)
             │                            {enabled, always, sigv4, originType: lambda},
             │                            timeouts: {readTimeout: 60}})  ──► PR 12's Lambda URL
             ├─ behavior "/events/*" ─► same, backends.events (RESPONSE_STREAM URL)
-            └─ default (S3) ─────────► router fn: request.uri = "/pr-12" + uri (SPA → /pr-12/index.html)
+            └─ default (S3) ─────────► router fn: request.uri = "/pr-12" + uri, or "/pr-12/index.html"
+                                       for any extensionless path (SPA shell — see below)
                                        origin unchanged: shared preview bucket (OAC)
 
 browser ──► oauth.preview.site/?code=..&state=<nonce>.<12>
@@ -394,6 +454,14 @@ KVS key: the full hostname. Value (≤ 1 KB):
 ```json
 {"v":1,"pr":12,"assets":"/pr-12","backends":{"api":"abc123.lambda-url.us-east-1.on.aws","events":"def456.lambda-url.us-east-1.on.aws"},"deployedAt":"2026-09-07T01:02:03Z"}
 ```
+
+**[revised, Epoch 2] The SPA fallback serves the shell; it does not append `index.html`.** A
+path whose last segment has no extension is a client route, so it rewrites to
+`<assets>/index.html`. The first implementation appended, turning `/auth/callback` into
+`pr-12/auth/callback/index.html`, and every deep route came back **403** — not 404, because an
+OAC bucket policy grants `s3:GetObject` and not `s3:ListBucket`, so S3 answers a missing key
+`AccessDenied`. A genuinely missing *asset* still fails, which is the point of keying on the
+extension. Epoch 4 would have hit this on its first Google login.
 
 The router function's code is generated by `PreviewSite` from the backend definitions (path
 patterns, read timeouts) and the site domain, so it needs no per-request configuration beyond
@@ -636,6 +704,12 @@ export class GithubDeployRole extends Construct { readonly role: iam.Role }
 
 Notes on the abstraction:
 
+- **[revised, Epoch 2] Two small additions the implementation needed.** `PreviewSite` also
+  exports `previewParameterPrefix(domain)` so `PreviewDeployment` and a consumer's sweeper
+  derive the SSM namespace from one place instead of three string literals, and
+  `renderRouterSource(props)` is exported from `.` so the generated router can be unit-tested
+  and diffed without synthesizing a stack. `PreviewDeploymentProps.unversioned` is accepted and
+  **ignored** — see the Epoch 2 deliverables for why previews use a single `BucketDeployment`.
 - **Thin by construction.** `Site` and `PreviewSite` together are one distribution each, one
   bucket each, one function, one KVS, DNS, and optionally one pool. Data storage, queues,
   tables, secrets for the app: the consumer's own constructs, in its own stacks, passed in as
@@ -772,9 +846,18 @@ streaming SSE endpoint, and clean teardown. No auth yet (backends run with `AUTH
   jitter, ≤ 10 attempts; Delete of a missing key is success). A vitest with a fake client
   covers the retry loop.
 - `PreviewDeployment`: `BucketDeployment` to `pr-<n>/` (`retainOnDelete: false`, `prune`
-  scoped, unversioned files `no-cache`, `__config.json` from `Source.jsonData`,
-  `distributionPaths: ['/pr-<n>/*']`), per-backend `CfnPermission`s scoped to the preview
-  distribution ARN, the `KvsRoute` custom resource, stack + resource tags `cdk-core:pr`.
+  scoped, `__config.json` from `Source.jsonData`, `distributionPaths: ['/pr-<n>/*']`),
+  per-backend `CfnPermission`s scoped to the preview distribution ARN, the `KvsRoute` custom
+  resource, stack + resource tags `cdk-core:pr`.
+  **[revised, Epoch 2] One `BucketDeployment`, not two, and everything is
+  `public, max-age=0, must-revalidate`** rather than hashed-immutable + unversioned-`no-cache`.
+  Two deployments sharing a prefix with `prune: true` delete each other's files, and a second
+  custom-resource invocation sits on the critical path of every push for a caching win a
+  short-lived preview never collects. `Site` (Epoch 3) still needs the real split.
+  **[revised, Epoch 2]** The KVS value carries a synth-time `deployedAt`, so the custom
+  resource updates on every deploy and re-puts the key — a preview whose key was swept heals on
+  the next push instead of staying dark. Costs ~2 s; makes `cdk diff` on a PR stack always
+  non-empty. `unversioned` on the props is accepted and ignored.
 - `infra/` for the reference: `bin/app.ts` with `CdkCoreShared`, `CdkCorePreview`,
   `CdkCore-pr-<n>` (context `pr`, validated), Lambdas via `NodejsFunction` (`NODEJS_22_X`,
   arm64, `externalModules: ['@aws-sdk/*']`), the events URL `RESPONSE_STREAM`.
@@ -797,6 +880,16 @@ AWS_PROFILE=admin aws cloudfront-keyvaluestore list-keys --kvs-arn "$(aws ssm ge
 AWS_PROFILE=admin aws s3 ls s3://<preview-bucket>/pr-1/ --region us-east-1   # empty
 ```
 Record the PR-stack deploy time in `progress.md`; target ≤ 3 min for a first deploy.
+
+**[revised, Epoch 2] Result: all of it passed at `b7d1521`.** First `CdkCore-pr-1` deploy
+**102 s** (target ≤ 180 s); `scripts/verify-preview.sh 1` **7 passed, 0 failed** including the
+signed POST and an SSE stream with 2004 ms of spread across 5 events; teardown **62 s**; after
+it, `verify-preview.sh 1 --expect-absent` **7 passed** (every check 404s), `list-keys` returned
+`{"Items": []}` and the `pr-1/` prefix was empty. Beyond the plan's list: three repeat deploys
+measured **32 / 33 / 33 s**, and the Playwright suite ran against a deployed target for the
+first time — `PLAYWRIGHT_BASE_URL=https://pr-1.preview.cdk-core.ty.ler.dev pnpm e2e` →
+`5 passed, 2 skipped` (the two skips are Epoch 1's dev-login tests, which Epoch 4 replaces with
+a machine-auth fixture).
 
 **Delegation.** Sonnet: router-source renderer + size test; handler retry loop + fake-client
 test; `verify-preview.sh`; `infra/bin/app.ts` scaffolding from the API; `cdk.md` first draft
@@ -1017,7 +1110,7 @@ numbers in `progress.md` (the user adjusts the targets; these are proposals):
 | A3 | Onboarding cost | ≤ 60 non-import CDK lines for four stacks; ≤ 30 min of human actions | `scripts/count-consumer-cdk.sh`; the `new-site` skill's checklist |
 | A4 | Local dev | `pnpm dev` serves the SPA and `/api/ping` within 10 s; no credentials | **met, Epoch 1 [revised]**: 1.14 s warm / 2.85 s cold, medians of 7 interleaved samples |
 | A5 | Claude end-to-end | open → preview → authenticated e2e → verified, zero human steps | Epoch 5 run |
-| A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | `e2e/sse.spec.ts` against a preview |
+| A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | **met unauthenticated, Epoch 2 [revised]**: 2004 ms of spread across 5 events through the preview distribution, `e2e/sse.spec.ts` green against `pr-1`. The "with auth" half is Epoch 4 |
 | A7 | Machine auth absent from prod | prod client `ExplicitAuthFlows` = refresh only; prod pool has no native users; preview token → prod API 401 | Epoch 4 commands |
 | A8 | Sweeper | finds and removes a deliberately orphaned key, prefix, and stack (Epoch 6 or by hand in 3) | `cleanup.yml` run log |
 
@@ -1108,12 +1201,17 @@ cdk-core/
 
 Ordered by how much of the plan they can invalidate. Each has an owner epoch.
 
-1. **OAC on a dynamically selected Lambda URL origin** (D1, Epoch 2 spike). Fallback is
-   designed. If even the fallback fails, previews fall back to yahn's per-PR distribution
-   with the rest of this plan intact — a 4-minute cost, not a redesign.
-2. **KVS ETag mismatch error code** is inferred (D2). The handler retries on both candidates.
+1. ~~**OAC on a dynamically selected Lambda URL origin**~~ (D1). **[revised, Epoch 2] Closed —
+   it works.** Proven by hand in the Epoch 2 spike and then in production shape; neither the
+   secret-header fallback nor yahn's per-PR distribution is needed.
+2. ~~**KVS ETag mismatch error code** is inferred~~ (D2). **[revised, Epoch 2] Closed — it is
+   `ValidationException: Pre-Condition failed`.** The handler still retries on both candidates.
+   A new hazard took its place and is also closed: the bundled handler must import
+   `@aws-sdk/signature-v4a` or every KVS call fails.
 3. **KVS propagation delay** has no SLA (D2). `pr-preview.yml` polls up to 5 min.
-4. **URI-rewrite cache keys** (D10) — proven in Epoch 2 step 2 before anything depends on it.
+4. ~~**URI-rewrite cache keys**~~ (D10). **[revised, Epoch 2] Closed — proven before anything
+   depended on it**, with query strings excluded from the cache policy so the rewritten URI was
+   the only differentiator.
 5. **Lite vs Essentials for social IdPs** doc conflict (D4) — moot, Essentials chosen.
 6. **`state` size** is undocumented; ours is ~30 chars.
 7. **Preview e2e flakiness on cold Lambdas** — Playwright `expect.timeout` 15 s, and the

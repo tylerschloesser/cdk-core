@@ -26,7 +26,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && esbuild src/handlers/preview-resources.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handlers/preview-resources/index.js && echo '{\"type\":\"commonjs\"}' > dist/handlers/preview-resources/package.json",
     "dev": "tsc -b --watch --preserveWatchOutput",
     "typecheck": "tsc -b tsconfig.test.json",
     "test": "vitest run"
@@ -44,6 +44,9 @@
     }
   },
   "devDependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "catalog:",
+    "@aws-sdk/signature-v4a": "catalog:",
+    "@types/aws-lambda": "catalog:",
     "@types/node": "catalog:",
     "aws-cdk-lib": "catalog:",
     "constructs": "catalog:",

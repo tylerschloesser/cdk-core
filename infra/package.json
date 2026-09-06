@@ -1,0 +1,21 @@
+{
+  "name": "infra",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@tylerschloesser/cdk-core": "workspace:*",
+    "aws-cdk-lib": "catalog:",
+    "constructs": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "aws-cdk": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}
