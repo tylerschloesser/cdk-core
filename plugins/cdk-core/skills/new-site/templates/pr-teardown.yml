@@ -63,10 +63,15 @@ jobs:
       - if: steps.stack.outputs.exists == 'true'
         run: aws cloudformation delete-stack --region us-east-1 --stack-name "$STACK"
 
+      # `GH_REPO`, because this job deliberately has no checkout: with no git
+      # remote to infer from, `gh pr comment` exits 1 with "failed to run git:
+      # fatal: not a git repository" — which is exactly how the first real
+      # teardown run went red *after* successfully deleting the stack.
       - if: steps.stack.outputs.exists == 'true'
         name: Comment
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh pr comment "$PR" --edit-last --create-if-none --body "$(cat <<EOF
           ### PR Preview
