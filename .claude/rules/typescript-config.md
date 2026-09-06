@@ -42,6 +42,15 @@ consumer outside this repo resolves. Consequences, all of them load-bearing:
 - Anything that runs the app needs `dist/` to exist. That is why root `dev` is
   `pnpm --filter @tylerschloesser/cdk-core run build && pnpm -r --parallel run dev`: one
   deterministic build, then `tsc -b --watch` alongside the servers.
+- **The package has a `prepare` script, so `pnpm install` builds it.** That is not a
+  convenience: pnpm creates the `cdk-core` bin link for `infra` only if `dist/bin/sweep.js`
+  already exists when the install runs, and in a fresh clone it does not. Without `prepare`,
+  `pnpm exec cdk-core sweep` in `cleanup.yml` fails with `Command "cdk-core" not found`, and
+  re-running `pnpm install` afterwards does **not** repair it — pnpm short-circuits with
+  "Already up to date" and relinks nothing, `--force` included. The cost is that a type error
+  in this package now fails `pnpm install`, not just `pnpm verify`.
+  `apps/web/dist` is still not built by any of this, so `pnpm build` before a `cdk` command
+  remains required (`.claude/rules/cdk.md`).
 
 ## The exports map
 

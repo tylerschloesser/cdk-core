@@ -38,10 +38,15 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # No separate build step: `@tylerschloesser/cdk-core` has a `prepare`
+      # script, so `pnpm install` builds it — which is also the only reason
+      # the `cdk-core` bin resolves at all. pnpm links a workspace bin only if
+      # its target exists when the install runs, and `dist/bin/sweep.js` is a
+      # build artifact, so in a fresh clone the link is created by that
+      # `prepare` or not at all. Without it this step fails with
+      # `Command "cdk-core" not found`, which is how the first run of this
+      # workflow went red.
       - run: pnpm install --frozen-lockfile
-
-      # The `cdk-core` bin is a bundled dist/ artifact, not source.
-      - run: pnpm --filter @tylerschloesser/cdk-core run build
 
       - uses: aws-actions/configure-aws-credentials@v6
         with:

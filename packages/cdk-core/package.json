@@ -27,6 +27,8 @@
   ],
   "scripts": {
     "build": "tsc -b && esbuild src/handlers/preview-resources.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handlers/preview-resources/index.js && echo '{\"type\":\"commonjs\"}' > dist/handlers/preview-resources/package.json && esbuild src/bin/sweep.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/bin/sweep.js --banner:js='#!/usr/bin/env node' && echo '{\"type\":\"commonjs\"}' > dist/bin/package.json",
+    "//prepare": "Runs `build` on every install. Two reasons, both load-bearing: pnpm only creates the `cdk-core` bin link for a workspace consumer if the bin target already exists at install time, and `dist/bin/sweep.js` is a build artifact — without this, `pnpm exec cdk-core sweep` in a fresh clone (every CI job) fails with `Command \"cdk-core\" not found`. It also means `npm publish` builds before packing.",
+    "prepare": "pnpm run build",
     "dev": "tsc -b --watch --preserveWatchOutput",
     "typecheck": "tsc -b tsconfig.test.json",
     "test": "vitest run"
