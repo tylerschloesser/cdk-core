@@ -24,6 +24,8 @@ catalog:
   aws-cdk: ^2.1140.0
   constructs: ^10.8.1
   esbuild: ^0.28.2
+  # handlers (Epoch 2)
+  '@aws-sdk/client-cloudfront-keyvaluestore': ^3.1127.0
   # e2e
   '@playwright/test': ^1.63.0
   # shared
