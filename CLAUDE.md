@@ -26,7 +26,10 @@ survives, so anything the next session must know goes in those files before you 
   from `aws cloudformation list-stacks`**, and never one that is not `CdkCore-pr-<n>` unless
   the epoch section says so. The GitHub OIDC provider already exists: import, never create.
 - **Every PR-numbered stack you create is deleted before you stop**, unless `progress.md`
-  records why it is alive. `cdk-core sweep --dry-run` is the check.
+  records why it is alive. Until `cdk-core sweep` is implemented (Epoch 3) the check is
+  `aws cloudformation list-stacks` for `CdkCore-pr-*`, `cloudfront-keyvaluestore list-keys` on
+  the KVS, and `aws s3 ls` on the preview bucket's `pr-<n>/` prefix — plus
+  `scripts/verify-preview.sh <n> --expect-absent`, which asserts all of it from the outside.
 - **`pnpm verify`, `pnpm dev` and `pnpm e2e` never touch AWS or need credentials.** That
   property is what lets a session verify its own work before opening a PR. Keep it. `verify`
   is lint + typecheck + unit tests + build; `e2e` is the browser suite and is deliberately
