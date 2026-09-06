@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: light-dark(#fff, #111);
+  color: light-dark(#111, #eee);
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+section {
+  border: 1px solid light-dark(#ddd, #333);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin-block: 1rem;
+}
+
+h1 {
+  font-size: 1.25rem;
+}
+
+h2 {
+  font-size: 1rem;
+  margin-top: 0;
+}
+
+input,
+button {
+  font: inherit;
+  padding: 0.25rem 0.5rem;
+  margin-right: 0.5rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+ul {
+  padding-left: 1.25rem;
+}
+
+[data-testid='error'] {
+  color: light-dark(#b00020, #ff6b6b);
+}
