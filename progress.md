@@ -383,3 +383,277 @@ AWS_PROFILE=admin aws cloudformation wait stack-delete-complete --region us-east
 - No new human action is owed for Epoch 3 beyond `aws sso login --profile admin`. Epoch 4 needs
   the Google OAuth client; Epoch 5 needs `npm login`.
 - PR #2 is **merged** into `main`; `main` is the base for Epoch 3's branch.
+
+## Epoch 3 — `Site` (prod), `GithubDeployRole`, the three workflows, the sweeper — 2026-09-06 — DONE
+
+`https://cdk-core.ty.ler.dev` is live and deployed by `deploy.yml`. Every PR on this repo gets
+a preview, its e2e runs against it, closing it tears it down, and the sweeper finds nothing
+left. Still no auth.
+
+Commits `ebc7cb5..` (PR #3, squashed and merged) plus `c47cefd`, `14c39cc`, `6df1e23` on the
+handoff branch.
+
+### Shipped
+
+- **`Site`** (`packages/cdk-core/src/site.ts`): prod bucket (OAC, `DESTROY` + `autoDeleteObjects`
+  — it holds only build output), distribution with the SPA-fallback function on the default
+  behavior, one behavior per backend on a real `FunctionUrlOrigin.withOriginAccessControl`, the
+  explicit second `lambda:InvokeFunction` grant per backend, apex A + AAAA, and the
+  **two-`BucketDeployment` split** previews skip: hashed assets `public, max-age=31536000,
+  immutable` + `prune: true`, then the unversioned globs (`*.html`, `sw.js`,
+  `manifest.webmanifest`, `registerSW.js`, `__config.json`) `no-cache`, `prune: false`, with a
+  `/*` invalidation and an explicit dependency on the first.
+- **What `Site` and `PreviewSite` share is now code, not convention.**
+  `src/behaviors.ts` `backendBehavior()` builds every backend behavior for both;
+  `src/behaviors.ts` `safeDistributionOverrides()` strips the four props `distributionOverrides`
+  may not replace (which is what makes that prop's doc comment true — it was not before);
+  `src/router/spa.ts` `renderSpaSource()` renders prod's fallback with the router's rule;
+  `src/backend.ts` `backendReadTimeoutSeconds()` derives the timeout for both.
+  **Proof the refactor is a no-op: `cdk synth CdkCorePreview` is byte-identical before and
+  after** (`diff` on the two `CdkCorePreview.template.json`).
+- **`CachePolicies.originDecides(scope)`** (`src/cache-policies.ts`), carried from yahn:
+  `minTtl/defaultTtl 0`, `maxTtl 5 min`, query strings in the key, no headers, no cookies.
+- **`GithubDeployRole`** (`src/github-deploy-role.ts`): imports the account's OIDC provider,
+  trusts both `sub` forms × both `ref:refs/heads/main` and `pull_request`, and grants
+  `sts:AssumeRole` on the bootstrap roles, `cloudformation:ListStacks` on `*`,
+  `DescribeStacks`/`DeleteStack` on `stack/CdkCore-pr-*`, `ssm:GetParameter(s)` on the preview
+  prefix, the four KVS actions on the KVS ARN, and `s3:ListBucket`/`DeleteObject` on the
+  preview bucket.
+- **`cdk-core sweep`** (`src/sweep/reconcile.ts` pure + `src/sweep/aws.ts` I/O +
+  `src/bin/sweep.ts` CLI), with `--dry-run`, 12 vitest cases against fakes.
+- **Five workflows** in `.github/workflows/`: `deploy.yml`, `pr-preview.yml`, `pr-teardown.yml`,
+  `cleanup.yml` (plus Epoch 1's `ci.yml`). All `cancel-in-progress: false`; teardown shares
+  pr-preview's concurrency group.
+- **Workflow templates** in `plugins/cdk-core/skills/new-site/templates/`, with
+  `test/workflow-templates.test.ts` asserting each renders **byte-identical** to the real
+  workflow after substituting `{{SITE_DOMAIN}}`, `{{STACK_PREFIX}}`, `{{PACKAGE_NAME}}`.
+- **README `## Deploying`** section, and a status paragraph that is true again.
+- 94 vitest cases across 9 files; `pnpm verify` and `actionlint .github/workflows/*.yml` green.
+
+### Acceptance test
+
+Run as written in the plan, in this order.
+
+```
+AWS_PROFILE=admin pnpm --filter infra exec cdk deploy CdkCoreGithubOidc --require-approval never
+  -> CdkCoreGithubOidc.DeployRoleRoleArn = arn:aws:iam::063257577013:role/cdk-core-github-deploy
+     Deployment time: 43.92s
+gh variable set AWS_DEPLOY_ROLE_ARN --body arn:aws:iam::063257577013:role/cdk-core-github-deploy
+  -> AWS_DEPLOY_ROLE_ARN  arn:aws:iam::063257577013:role/cdk-core-github-deploy
+
+AWS_PROFILE=admin pnpm --filter infra exec cdk deploy CdkCoreSite --require-approval never
+  -> CdkCoreSite.SiteUrl = https://cdk-core.ty.ler.dev    Deployment time: 223.8s (240 s wall)
+curl https://cdk-core.ty.ler.dev/api/ping          -> {"message":"pong"}
+curl https://cdk-core.ty.ler.dev/__config.json     -> {"site":"cdk-core.ty.ler.dev","mode":"prod"}
+curl -o/dev/null -w%{http_code} .../auth/callback  -> 200   (SPA fallback serves the shell)
+curl -o/dev/null -w%{http_code} .../assets/nope.js -> 403   (a missing *asset* still fails)
+curl -I .../                                       -> cache-control: no-cache
+curl -I .../assets/index-2lZu2ZaV.js               -> cache-control: public, max-age=31536000, immutable
+PLAYWRIGHT_BASE_URL=https://cdk-core.ty.ler.dev pnpm e2e   -> 5 passed, 2 skipped
+
+gh pr create (#3) ; gh run watch
+  -> CI success; PR Preview success, comment: "✅ deployed and e2e passed ... deploy 95 s ·
+     push → comment 149 s"
+scripts/verify-preview.sh 3                        -> 7 passed, 0 failed
+PLAYWRIGHT_BASE_URL=https://pr-3.preview.cdk-core.ty.ler.dev pnpm e2e -> 5 passed, 2 skipped
+
+gh workflow run deploy.yml (and the push-to-main run)
+  -> Deploy [push] success 148 s; Deploy [workflow_dispatch] success 103 s.
+     Both ran verify, local e2e, `cdk deploy CdkCoreShared CdkCorePreview CdkCoreSite`,
+     the /api/ping poll, and e2e against production.
+
+git commit --allow-empty && git push  (throwaway PR #4, then closed not merged)
+  -> PR Preview success, comment: "deploy 93 s · push → comment 165 s"
+scripts/verify-preview.sh 4                        -> 7 passed, 0 failed
+gh pr close 4 ; gh run watch
+  -> PR Teardown success in 14 s
+aws cloudformation wait stack-delete-complete --stack-name CdkCore-pr-4
+  -> returned 86 s after `gh pr close`
+scripts/verify-preview.sh 4 --expect-absent        -> 7 passed, 0 failed (every check 404s)
+
+AWS_PROFILE=admin pnpm --filter infra exec cdk-core sweep --site cdk-core.ty.ler.dev \
+  --stack-prefix CdkCore --repo tylerschloesser/cdk-core --dry-run
+  -> (nothing to reconcile)        exit 0
+aws cloudfront-keyvaluestore list-keys --kvs-arn <kvs>  -> {"Items": []}
+aws s3 ls s3://cdkcorepreview-previewassets8b9f2052-z0r9uodmnime/  -> empty
+```
+
+**Timings against A1** (four preview deploys, not a randomized study — the target has ~2x
+headroom, so more sampling was not warranted; each number is one observation):
+
+| | deploy step | job start → comment | real `git push` → comment |
+| --- | --- | --- | --- |
+| PR #3, new stack | 95 s | 149 s | — (triggered by `pr create`) |
+| PR #3, empty commit | **29 s** | 80 s | **88 s** |
+| PR #3, third push | 33 s | 100 s | — |
+| PR #4, new stack | 93 s | 165 s | — |
+
+Target: ≤ 5 min first deploy, ≤ 3 min repeat. Both met with room. Teardown workflow 14 s
+against a ≤ 2 min target; the stack is fully gone 86 s after the close.
+
+The IAM scope check the plan asked for, `aws iam simulate-principal-policy` on the new role:
+
+| Resource | `cloudformation:DeleteStack` |
+| --- | --- |
+| `stack/YahnAppStack-prod/*` | **implicitDeny** |
+| `stack/ThaiLerDevSiteStack/*` | **implicitDeny** |
+| `stack/CDKToolkit/*` | **implicitDeny** |
+| `stack/CdkCoreSite/*` | **implicitDeny** |
+| `stack/CdkCore-pr-7/*` | allowed |
+
+The **$10/month budget**, created by hand (there were none in the account before):
+
+```
+aws budgets create-budget --account-id 063257577013 --region us-east-1 \
+  --budget '{"BudgetName":"account-monthly-10-usd","BudgetLimit":{"Amount":"10","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' \
+  --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"tyler.schloesser+aws-user@gmail.com"}]},{"Notification":{"NotificationType":"FORECASTED","ComparisonOperator":"GREATER_THAN","Threshold":100,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"tyler.schloesser+aws-user@gmail.com"}]}]'
+```
+
+**The one acceptance line not yet green at the time of this entry: `gh workflow run
+cleanup.yml`.** Its first run failed (`Command "cdk-core" not found`, fixed by `14c39cc` — see
+deviation 4), and the fixed version cannot be dispatched from a branch: the deploy role's trust
+allows `ref:refs/heads/main` and `pull_request` and nothing else, so
+`gh workflow run cleanup.yml --ref epoch-3-handoff` is refused at
+`sts:AssumeRoleWithWebIdentity` — correct behaviour, not a bug. It is dispatched from `main`
+immediately after this branch merges, and the result is recorded in the follow-up commit.
+
+### Deviations from the plan
+
+1. **`Site` warns on `auth` rather than throwing, and its bucket is `DESTROY` +
+   `autoDeleteObjects`.** The warning matches `PreviewSite`'s Epoch 2 shape
+   (`@tylerschloesser/cdk-core:siteAuthNotImplemented`). The removal policy is a real choice:
+   the prod bucket holds only build output, every byte of it reproducible from a deploy, and
+   the plan's Teardown section promises `cdk destroy CdkCoreSite` removes everything. A
+   consumer with a bucket that holds something else should pass their own.
+2. **`GithubDeployRoleProps` grew `ownerId` and `repoId`.** The drafted API had only `repo`,
+   which cannot build GitHub's immutable `repo:<owner>@<ownerId>/<name>@<repoId>:…` subject.
+   The alternative — a wildcard on the owner id — would trust any account that ever takes the
+   name `tylerschloesser`, which is the exact thing the immutable form exists to prevent. Both
+   forms are trusted when both ids are given; only the legacy form otherwise.
+3. **The KVS ARN and preview bucket name reach the role's IAM via
+   `ssm.StringParameter.valueFromLookup`, so `infra/cdk.context.json` is now committed.**
+   `valueForStringParameter` yields a `{{resolve:ssm:…}}` deploy-time token, which cannot
+   appear inside an IAM resource ARN. The cost: the first synth on a machine with no cached
+   context produces `dummy-value-for-…` and a template-validation *warning* until the lookup
+   runs once with credentials.
+4. **The sweep bin is bundled CommonJS, and `packages/cdk-core` now has a `prepare` script.**
+   Two failures found by running things, neither reachable by a unit test:
+   - Bundled as **ESM**, the CLI builds clean and dies on its first AWS call with
+     `Dynamic require of "node:https" is not supported` — the SDK's CJS dependencies
+     `require()` at runtime and esbuild's ESM output has no `require` to give them. Now
+     `--format=cjs` with `dist/bin/package.json` = `{"type":"commonjs"}`, the same trick
+     `dist/handlers/` already used.
+   - `pnpm exec cdk-core sweep` in CI failed with `Command "cdk-core" not found`. pnpm creates
+     a workspace bin link only if the bin's target exists **at install time**, and
+     `dist/bin/sweep.js` is a build artifact, so a fresh clone never gets the link — and
+     building afterwards does not repair it: a second `pnpm install` short-circuits with
+     "Already up to date" and relinks nothing, `--force` included (all four combinations
+     measured). A `prepare` script on the package is the fix; pnpm runs it during
+     `pnpm install --frozen-lockfile` on a clean tree. `cleanup.yml` therefore has no build
+     step of its own, and says so in a comment.
+5. **`pr-teardown.yml` needed `GH_REPO`.** Its first real run deleted `CdkCore-pr-3` correctly
+   and then went red on the comment: `gh pr comment` with no checkout has no git remote to
+   infer the repository from and exits 1 with `failed to run git: fatal: not a git repository`.
+   Not having a checkout is the *point* of that workflow, so the fix is to tell `gh` where it
+   is, not to add a checkout.
+6. **`distributionOverrides` could previously replace the behaviors** on `PreviewSite`, because
+   it was spread last — directly contradicting its own doc comment. `safeDistributionOverrides`
+   strips `defaultBehavior`, `additionalBehaviors`, `domainNames` and `certificate`, and the
+   remainder is spread *before* them so `priceClass`, `logging` and friends still work. A
+   `Site` test asserts a hostile override changes the price class and nothing else.
+7. **`CdkCoreSite` was deployed by hand first, then by `deploy.yml`.** The plan's acceptance
+   test has `deploy.yml` create it, but `workflow_dispatch` requires the workflow on the
+   default branch, and a first CloudFront create is a four-minute round trip to discover a
+   construct bug in. Deploying by hand first put construct failures on a 4-minute local loop;
+   `deploy.yml` then proved the workflow rather than the construct. Both paths are green.
+8. **Five workflows, not four.** `ci.yml` already existed from Epoch 1; the plan's "the three
+   workflows" in the section title undercounts its own deliverables list, which names four.
+
+### Left undone / untested
+
+- **`cleanup.yml`'s dispatch from `main`** — see the acceptance section. Everything it runs was
+  proven locally, including under CI conditions (every `node_modules` and `dist` deleted, then
+  `pnpm install --frozen-lockfile`, then the bin resolving).
+- **Nothing has raced two PR deploys**, still. The KVS retry loop has still only met a fake
+  client and a single-writer live store. Epoch 6 owns it.
+- **The sweeper has never actually deleted anything.** Every live run found either an open PR
+  or nothing. Its delete paths are covered only by the fake-client tests; A8 asks for a
+  deliberately orphaned key, prefix and stack, and that is still owed (Epoch 6, or by hand).
+- **`CachePolicies.originDecides` is not used by the reference site.** It is unit-tested and
+  offered; no deployed behavior uses it.
+- **All `auth` props still warn and do nothing**, on `Site` as well as `PreviewSite`.
+- The bounce host is still only unit- and `test-function`-tested. Unchanged from Epoch 2.
+
+### AWS resources alive after this epoch
+
+`CdkCoreShared` (the ACM certificate), `CdkCorePreview` (distribution `E3DN700ELXRXMT`, bucket
+`cdkcorepreview-previewassets8b9f2052-z0r9uodmnime`, KVS `c23e3678-4dea-4cf8-b6d2-1aa0b8e1f364`,
+the router function, two wildcard DNS records, four SSM parameters), **`CdkCoreSite`** (bucket,
+distribution, SPA function, apex A/AAAA, two Lambdas + function URLs) and **`CdkCoreGithubOidc`**
+(the IAM role `cdk-core-github-deploy`). Plus the account-level budget
+`account-monthly-10-usd`, which is not in any stack. Idle cost is CloudFront/S3 pennies.
+
+**No PR stack is alive**; `CdkCore-pr-3` and `CdkCore-pr-4` were both created, verified and
+deleted, and the KVS and the preview bucket were confirmed empty afterwards.
+
+To remove everything:
+
+```
+AWS_PROFILE=admin pnpm build
+AWS_PROFILE=admin pnpm --filter infra exec cdk destroy CdkCoreSite CdkCorePreview CdkCoreShared CdkCoreGithubOidc
+gh variable delete AWS_DEPLOY_ROLE_ARN
+AWS_PROFILE=admin aws budgets delete-budget --account-id 063257577013 --region us-east-1 --budget-name account-monthly-10-usd
+```
+
+To remove a leaked PR stack (only ever a name read back from `list-stacks`):
+
+```
+AWS_PROFILE=admin aws cloudformation delete-stack --region us-east-1 --stack-name CdkCore-pr-<n>
+AWS_PROFILE=admin aws cloudformation wait stack-delete-complete --region us-east-1 --stack-name CdkCore-pr-<n>
+```
+
+…or just let the sweeper do it: `cdk-core sweep` without `--dry-run`.
+
+### What the next epoch needs to know
+
+- **`.claude/rules/cdk.md` was split in three**, because it had grown past the ~120-line
+  budget `CLAUDE.md` sets: `cdk.md` keeps the stacks, the router and origins/OAC;
+  `.claude/rules/workflows.md` is new (the five workflows, the deploy role, the four things
+  that bit); `.claude/rules/streaming-and-kvs.md` holds the streaming contract and KVS writes.
+  Each file's `paths` frontmatter is narrowed to match, so touching a workflow no longer loads
+  the CloudFront-origin material and vice versa.
+- **`pnpm install` now builds `packages/cdk-core`.** It has a `prepare` script, and that is
+  load-bearing, not tidiness — see deviation 4 and `.claude/rules/typescript-config.md`. The
+  consequence: a type error in this package fails `pnpm install`, not just `pnpm verify`.
+- **`apps/web/dist` is still not built by any of that**, so `pnpm build` before any `cdk`
+  command remains required. Unchanged.
+- **`deploy.yml` runs on every push to `main`**, so the handoff commit itself deploys
+  production. That is fine, but it means a broken `main` is a broken prod site, and the merge
+  of an epoch branch is a deploy.
+- **The deploy role trusts `ref:refs/heads/main` and `pull_request`, and nothing else.** A
+  `workflow_dispatch` from any other branch is refused at `sts:AssumeRoleWithWebIdentity`. If a
+  future epoch wants to dispatch a workflow from a branch, that is a trust-policy change, not a
+  workflow change.
+- **`CdkCoreGithubOidc` synthesizes on every CDK command**, including in CI, and does two SSM
+  lookups. They are cached in the committed `infra/cdk.context.json`. If `CdkCorePreview` is
+  ever recreated, the KVS ARN and bucket name change and that file goes stale — the role would
+  then be scoped to a dead ARN and the sweeper would start getting `AccessDenied`. Delete the
+  two entries and re-synth with credentials.
+- **Adding a workflow means adding a template**, or `test/workflow-templates.test.ts` fails.
+  It pairs the two directories by "workflow requests `id-token: write`", which is what
+  distinguishes an AWS-touching workflow from `ci.yml`.
+- **`Site`'s two `BucketDeployment`s must keep their `prune` asymmetry**: `true` on the hashed
+  half with the unversioned globs excluded, `false` on the unversioned half. Flipping the
+  second to `true` deletes every hashed asset the first just uploaded, because it only
+  *includes* those globs.
+- **The account now has a $10/month budget** notifying `tyler.schloesser+aws-user@gmail.com` at
+  80% actual and 100% forecast. It is account-wide, not per-project, and there were none before.
+- Epoch 4 owns the Google OAuth client (a human action, console-only — there is no API) and
+  turning every `auth` prop from a warning into a pool. Epoch 5 owns `npm login` and the
+  plugin. Both are unchanged.
+- The repo is still **public**, and `plan.md`, `progress.md`, `README.md`, `CLAUDE.md`,
+  `.claude/rules/cdk.md`, `docs/spikes/` and now `infra/cdk.context.json` and
+  `infra/bin/app.ts` carry the account id, both zone ids, the preview distribution/bucket/KVS
+  ids, the deploy role ARN and GitHub's numeric owner/repo ids. Still not credentials, still
+  world-readable — **the confirm asked for after Epoch 1 is still outstanding, and this epoch
+  added to the pile.**

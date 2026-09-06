@@ -13,7 +13,7 @@
 // taking the sweep down with it. This side-effect import is what registers
 // the pure-JS implementation; the package declares `sideEffects: true`, so
 // esbuild keeps it. Same hazard, same fix, as `src/handlers/preview-resources.ts`
-// (`.claude/rules/cdk.md` § KeyValueStore writes).
+// (`.claude/rules/streaming-and-kvs.md` § KeyValueStore writes).
 import '@aws-sdk/signature-v4a'
 
 import { execFile } from 'node:child_process'
