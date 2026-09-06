@@ -10,8 +10,9 @@
 > and tears down completely in **62 s**. `CdkCoreShared` and `CdkCorePreview` are alive in the
 > account (≈ $0 idle); **no PR stack is alive**. `Site`, `GithubDeployRole`, all `auth` props
 > and every workflow are still Epoch 3+. `pnpm verify`, `pnpm dev` and `pnpm e2e` still need no
-> credentials. Epoch 2 is **PR #2**, CI green (run `34063308975`), not yet merged — merge it
-> before starting Epoch 3, whose branch bases on `main`. The next session runs `/epoch 3`.
+> credentials. Epoch 2 merged to `main` as **PR #2** (merge commit `ccf576d`, CI run
+> `34063308975` green); `main` is the base for Epoch 3's branch. The next session runs
+> `/epoch 3`.
 >
 > Corrections made against measurement or a failing run, each marked **`[revised]`** in place:
 >

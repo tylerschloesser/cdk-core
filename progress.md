@@ -163,8 +163,8 @@ Budget was 10 s (A4). `node_modules` present in both; `pnpm install` is not in t
 
 ## Epoch 2 — Preview topology: `PreviewSite`, `PreviewDeployment`, the routing spike — 2026-09-06 — DONE
 
-Commits `4cee88d..e408981` on `epoch-2-preview-topology`, opened as **PR #2** (not merged at
-handoff time). CI run `34063308975` green: `verify` plus `7 passed (9.4s)`.
+Commits `4cee88d..b1037d0`, merged to `main` as **PR #2** (merge commit `ccf576d`); the branch
+is deleted. CI run `34063308975` green: `verify` plus `7 passed (9.4s)`.
 
 ### Shipped
 
@@ -382,3 +382,4 @@ AWS_PROFILE=admin aws cloudformation wait stack-delete-complete --region us-east
   still outstanding.
 - No new human action is owed for Epoch 3 beyond `aws sso login --profile admin`. Epoch 4 needs
   the Google OAuth client; Epoch 5 needs `npm login`.
+- PR #2 is **merged** into `main`; `main` is the base for Epoch 3's branch.
