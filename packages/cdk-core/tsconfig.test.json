@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "noEmit": true,
+    // Its own build-info path: `tsconfig.base.json` derives one from
+    // `${configDir}`, which is the same directory for both projects in this
+    // package, and two projects cannot share one (TS6377).
+    "tsBuildInfoFile": "${configDir}/node_modules/.tmp/tsconfig.test.tsbuildinfo"
+  },
+  "references": [{ "path": "./tsconfig.json" }],
+  "include": ["test", "vitest.config.ts"]
+}

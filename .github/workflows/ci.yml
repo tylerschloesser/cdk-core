@@ -1,0 +1,45 @@
+# The fast, credential-free signal on every PR.
+#
+# It runs in parallel with the preview deploy (Epoch 3's pr-preview.yml) rather
+# than gating it: this job needs no AWS credentials and leaves nothing behind
+# server-side, so cancelling an in-progress run when a new commit lands is
+# always safe. Every workflow that touches AWS sets cancel-in-progress: false
+# for the opposite reason.
+#
+# `pnpm verify` is lint + typecheck + test + build, and `pnpm e2e` boots
+# `pnpm dev` itself through Playwright's webServer — the same two commands a
+# session runs locally before opening a PR.
+
+name: CI
+
+on: pull_request
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+
+      # `--filter e2e`, not a bare `pnpm exec`: @playwright/test is a
+      # dependency of the e2e package, not of the root, so the binary only
+      # resolves inside it.
+      - run: pnpm --filter e2e exec playwright install --with-deps chromium
+      - run: pnpm e2e
+

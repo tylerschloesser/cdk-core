@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    // DOM for `auth/browser` (fetch, localStorage, crypto.subtle, ReadableStream)
+    // and node for `auth/server` and `bin/`. The two halves are separated by the
+    // exports map, not by tsconfig: one program keeps `tsc -b` to a single pass.
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "composite": true,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@tylerschloesser/cdk-core": "workspace:*",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@hono/node-server": "catalog:",
+    "@types/aws-lambda": "catalog:",
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

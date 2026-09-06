@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/cdk-core" },
+    { "path": "./apps/api" },
+    { "path": "./apps/web" },
+    { "path": "./e2e" }
+  ]
+}

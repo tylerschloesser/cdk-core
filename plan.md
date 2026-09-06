@@ -2,18 +2,38 @@
 
 > ## Status — 2026-09-06
 >
-> **Epoch 0 (planning) is complete. No code, no AWS resources, no npm package exist yet.**
-> This file, `docs/prior-art.md`, `progress.md`, `CLAUDE.md`, and the `/epoch` + `/handoff`
-> skills are the whole repo. The next session runs `/epoch 1`.
+> **Epochs 0 and 1 are complete.** The monorepo, the reference app (`apps/web`, `apps/api`),
+> the local e2e suite and CI all exist and are green; the GitHub repo
+> `tylerschloesser/cdk-core` is created (public, no branch protection) and Epoch 1 is merged
+> to `main`. **No AWS resources and no npm package exist yet** — every construct in
+> `packages/cdk-core` is a typed stub whose constructor throws. `pnpm verify`, `pnpm dev` and
+> `pnpm e2e` need no credentials. The next session runs `/epoch 2`.
 >
-> Nothing below has been corrected against a measurement yet. When something is, the
-> correction is marked **`[revised]`** with the reason, and the list below grows:
+> Corrections made against measurement or a failing run, each marked **`[revised]`** in place:
 >
-> 1. (none yet)
+> 1. **Epoch 1 deliverables — `packages/cdk-core` is consumed as built `dist/`, not as
+>    source.** Its exports map is the contract an npm consumer resolves (Epoch 5), so it
+>    cannot be imported as TypeScript the way `thai.ler.dev`'s packages are. Forces `.js`
+>    specifiers inside `src/`, project references from `apps/*`, and a build step at the head
+>    of `pnpm dev`. Details in `.claude/rules/typescript-config.md`.
+> 2. **Epoch 1 deliverables — the `e2e` package's script is `e2e`, not `test`.** Named `test`
+>    it was swept into `pnpm -r run test` inside `pnpm verify`, running the browser suite
+>    twice per CI job. Browsers install with `pnpm --filter e2e exec playwright install
+>    chromium`; a bare `pnpm exec playwright` from the root cannot find the binary.
+> 3. **Epoch 1 acceptance — `pnpm dev` startup measured at 1.14 s warm / 2.85 s cold**
+>    (medians of 7 interleaved samples; ranges 0.91–1.15 and 2.63–3.70). Budget was 10 s, so
+>    A4 has ~3x headroom even cold. Numbers in `progress.md`.
+> 4. **Construct API — `aws-cdk-lib` and `constructs` are *optional* peer dependencies, and
+>    `auth/server` types Hono structurally.** A consumer that only wants `auth/browser` must
+>    not have to install CDK, and the package must not pin a consumer's Hono major.
 >
 > **Human actions owed before any epoch can finish** (see the epoch sections for when each is
-> needed): none for Epoch 1. Epoch 2 needs `aws sso login --profile admin`. Epoch 4 needs a
-> Google OAuth client. Epoch 5 needs `npm login`.
+> needed): none for Epoch 2 beyond `aws sso login --profile admin`. Epoch 4 needs a Google
+> OAuth client. Epoch 5 needs `npm login`.
+>
+> **One thing for the user to confirm:** the repo is public per Epoch 1's plan text, and
+> `plan.md` + `CLAUDE.md` carry the AWS account id and both hosted-zone ids. Not credentials,
+> but now world-readable — say if that should change before more account detail is committed.
 
 ## How to use this document
 
@@ -604,9 +624,14 @@ export interface GithubDeployRoleProps {
 export class GithubDeployRole extends Construct { readonly role: iam.Role }
 
 // ---------- runtime subpaths ----------
-// '@tylerschloesser/cdk-core/auth/browser': loadConfig(), login(), handleCallback(), getToken(), logout(), apiFetch(), readSse()
-// '@tylerschloesser/cdk-core/auth/server':  createVerifier(env), getUser(c) for Hono, isLocalMode()
+// '@tylerschloesser/cdk-core/auth/browser': loadConfig(), login(devUser?), handleCallback(), getToken(), logout(), apiFetch(), readSse()
+// '@tylerschloesser/cdk-core/auth/server':  createVerifier(env), getUser(c), authMode(), isLocalMode()
 // bin: 'cdk-core sweep ...'
+//
+// [revised, Epoch 1] `aws-cdk-lib` and `constructs` are **optional** peer dependencies, and
+// `auth/server` types Hono's context structurally (`RequestLike`: `{ req: { header(name) } }`)
+// rather than importing `hono`. A browser bundle or a Lambda that only wants the auth helpers
+// must not be made to install CDK, and the package must not pin a consumer's Hono major.
 ```
 
 Notes on the abstraction:
@@ -640,7 +665,7 @@ Deliverables: `plan.md`, `docs/prior-art.md`, `docs/research/*.md`, `progress.md
 `.claude/settings.json`, `.gitignore`. No AWS resources. Acceptance: `git log` shows the
 commit; `/epoch 1` in a fresh session prints the Epoch 1 section.
 
-### Epoch 1 — Monorepo, reference app, local dev, local e2e, CI
+### Epoch 1 — Monorepo, reference app, local dev, local e2e, CI (done 2026-09-06)
 
 **Goal.** A credential-free local loop that a later session can trust: `pnpm dev` up in under
 10 s, `pnpm verify` green, Playwright green locally, CI running the same on every PR. The
@@ -649,7 +674,12 @@ package compiles but exports only types and stubs. Nothing touches AWS.
 **Deliverables.**
 - `pnpm-workspace.yaml` (`packages/*`, `apps/*`, `infra`, `e2e`) with a `catalog:` block;
   root `package.json` scripts: `dev`, `build`, `typecheck`, `lint`, `test`, `e2e`, `verify`
-  (= lint + typecheck + test + build). `esbuild` as a **root** devDependency. TypeScript
+  (= lint + typecheck + test + build). **[revised, Epoch 1]** The `e2e` package's own script
+  is named `e2e`, not `test`, and root `e2e` is `pnpm --filter e2e run e2e`: named `test` it
+  was swept into `pnpm -r run test` inside `verify`, so every CI job ran the browser suite
+  twice and `verify` stopped being runnable without browsers. Root `dev` is
+  `pnpm --filter @tylerschloesser/cdk-core run build && pnpm -r --parallel run dev`, because
+  the package is consumed as built `dist/` (below) and Vite and tsx need it to exist. `esbuild` as a **root** devDependency. TypeScript
   `~6.0` (not 7 — see yahn's note about `@css-modules-kit`; the reference does not need CSS
   Modules, so plain TS 6 + `verbatimModuleSyntax` + `erasableSyntaxOnly`). oxlint. No
   formatter; no semicolons; single quotes.
@@ -676,7 +706,10 @@ package compiles but exports only types and stubs. Nothing touches AWS.
   the user). One config, two targets (`PLAYWRIGHT_BASE_URL`), local target boots `pnpm dev`.
 - `.github/workflows/ci.yml` (verify + e2e, no AWS), the GitHub repo created
   (`gh repo create tylerschloesser/cdk-core --public --source . --push`), branch protection
-  off (solo).
+  off (solo). **[revised, Epoch 1]** The browser install step is
+  `pnpm --filter e2e exec playwright install --with-deps chromium`: `@playwright/test` is a
+  dependency of the `e2e` package, not of the root, so a bare `pnpm exec playwright` fails
+  with "Command not found" — CI's first run died on exactly that.
 - `README.md` (short, for people), `.claude/rules/typescript-config.md`, `.claude/rules/testing.md`.
 
 **Files.** Everything above; `plan.md` Status; `progress.md`.
@@ -688,6 +721,11 @@ pnpm install && pnpm verify && pnpm e2e
 ( pnpm dev & ) ; t0=$(date +%s); until curl -fsS localhost:5173 >/dev/null && curl -fsS localhost:3001/api/ping | grep -q pong; do sleep 0.5; done; echo "dev up in $(( $(date +%s) - t0 ))s"   # must print ≤ 10
 ```
 CI green on a throwaway PR.
+
+**[revised, Epoch 1] Result.** All three parts passed at `6c2b3c3`; CI run `34056658137` was
+green (`7 passed`). The timed command printed `dev up in 2s`. Measured properly over 7
+interleaved samples: **1.14 s** warm (0.91–1.15) and **2.85 s** cold with `dist/` wiped
+(2.63–3.70), against a 10 s budget.
 
 **Delegation.** Sonnet `implementer` chunks (each with its check): workspace scaffold
 (`pnpm install` succeeds); `apps/api` (`curl :3001/api/ping`); `apps/web` (`pnpm build`
@@ -977,7 +1015,7 @@ numbers in `progress.md` (the user adjusts the targets; these are proposals):
 | A1 | PR preview reachable from push | ≤ 5 min first deploy, ≤ 3 min repeat (yahn: ~6 min) | `pr-preview.yml` timings in the sticky comment |
 | A2 | Teardown leaves zero billable resources | 0 stacks, 0 KVS keys, 0 `pr-*/` prefixes after close | `cdk-core sweep --dry-run` exits 0 with nothing to do |
 | A3 | Onboarding cost | ≤ 60 non-import CDK lines for four stacks; ≤ 30 min of human actions | `scripts/count-consumer-cdk.sh`; the `new-site` skill's checklist |
-| A4 | Local dev | `pnpm dev` serves the SPA and `/api/ping` within 10 s; no credentials | Epoch 1 timing command |
+| A4 | Local dev | `pnpm dev` serves the SPA and `/api/ping` within 10 s; no credentials | **met, Epoch 1 [revised]**: 1.14 s warm / 2.85 s cold, medians of 7 interleaved samples |
 | A5 | Claude end-to-end | open → preview → authenticated e2e → verified, zero human steps | Epoch 5 run |
 | A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | `e2e/sse.spec.ts` against a preview |
 | A7 | Machine auth absent from prod | prod client `ExplicitAuthFlows` = refresh only; prod pool has no native users; preview token → prod API 401 | Epoch 4 commands |
@@ -1062,6 +1100,7 @@ cdk-core/
 ├── packages/cdk-core/  src/{index,site,preview-site,preview-deployment,github-deploy-role,certificate}.ts
 │                       src/router/  src/handlers/  src/auth/{browser,server}.ts  src/bin/sweep.ts  dist/
 ├── apps/web/  apps/api/  e2e/  infra/{bin,lib}/  scripts/  docs/{prior-art.md,research/,spikes/}
+│                       e2e/ is a workspace package: playwright.config.ts + *.spec.ts at its root
 └── .github/workflows/  ci.yml  deploy.yml  pr-preview.yml  pr-teardown.yml  cleanup.yml
 ```
 

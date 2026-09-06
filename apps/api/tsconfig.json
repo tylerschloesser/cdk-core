@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["ES2023"],
+    "types": ["node", "aws-lambda"],
+    "noEmit": true
+  },
+  "references": [{ "path": "../../packages/cdk-core" }],
+  "include": ["src"]
+}

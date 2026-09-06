@@ -27,8 +27,13 @@ survives, so anything the next session must know goes in those files before you 
   the epoch section says so. The GitHub OIDC provider already exists: import, never create.
 - **Every PR-numbered stack you create is deleted before you stop**, unless `progress.md`
   records why it is alive. `cdk-core sweep --dry-run` is the check.
-- **`pnpm verify` and `pnpm dev` never touch AWS or need credentials.** That property is what
-  lets a session verify its own work before opening a PR. Keep it.
+- **`pnpm verify`, `pnpm dev` and `pnpm e2e` never touch AWS or need credentials.** That
+  property is what lets a session verify its own work before opening a PR. Keep it. `verify`
+  is lint + typecheck + unit tests + build; `e2e` is the browser suite and is deliberately
+  *not* inside it (`pnpm --filter e2e exec playwright install chromium` once per clone).
+- **The GitHub repo is public.** Nothing secret goes in a tracked file — and the account id
+  and zone ids already in this file and `plan.md` are world-readable, so do not add more
+  account detail without asking.
 - Delegate per `plan.md` → Delegation plan: `implementer`/`verifier` (`.claude/agents/`, both
   sonnet) for chunks with a one-line acceptance check; the orchestrator does every AWS
   interaction, every measurement, and anything touching the Construct API.
