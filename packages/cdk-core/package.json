@@ -1,0 +1,53 @@
+{
+  "name": "@tylerschloesser/cdk-core",
+  "version": "0.0.0",
+  "description": "CDK constructs for PR-previewed, Google-authed personal sites",
+  "license": "MIT",
+  "type": "module",
+  "//": "The subpath exports are the contract every consumer and every later epoch builds on. `.` is CDK-only (synth time, needs aws-cdk-lib); `./auth/browser` is DOM-only; `./auth/server` is Node-only. Keeping them apart is what lets a browser bundle import auth without pulling in aws-cdk-lib.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./auth/browser": {
+      "types": "./dist/auth/browser.d.ts",
+      "default": "./dist/auth/browser.js"
+    },
+    "./auth/server": {
+      "types": "./dist/auth/server.d.ts",
+      "default": "./dist/auth/server.js"
+    }
+  },
+  "bin": {
+    "cdk-core": "./dist/bin/sweep.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch --preserveWatchOutput",
+    "typecheck": "tsc -b tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "aws-cdk-lib": "^2.268.0",
+    "constructs": "^10.8.1"
+  },
+  "peerDependenciesMeta": {
+    "aws-cdk-lib": {
+      "optional": true
+    },
+    "constructs": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "aws-cdk-lib": "catalog:",
+    "constructs": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

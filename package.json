@@ -1,0 +1,25 @@
+{
+  "name": "cdk-core",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @tylerschloesser/cdk-core run build && pnpm -r --parallel run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "test": "pnpm -r run test",
+    "e2e": "pnpm --filter e2e run test",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "//": "esbuild is a root devDep, not infra's: CDK's NodejsFunction runs the bundler from the workspace root (where the lockfile lives), so that is where the binary must resolve.",
+  "devDependencies": {
+    "esbuild": "catalog:",
+    "oxlint": "catalog:",
+    "typescript": "catalog:"
+  }
+}
