@@ -17,6 +17,17 @@ import type {
   CdkCustomResourceResponse,
 } from 'aws-lambda'
 
+// The CloudFront KeyValueStore data-plane endpoint is global, so its client
+// signs with **SigV4A**, and the AWS SDK ships no SigV4A implementation by
+// default — it looks one up in a registry that a separate package populates on
+// import. Bundled, that lookup finds nothing and every call fails at
+// `describe` with "Neither CRT nor JS SigV4a implementation is available".
+// This side-effect import is what registers the pure-JS implementation; the
+// package declares `sideEffects: true`, so esbuild keeps it. It is not
+// optional and it is not unused — deleting it breaks every preview deploy.
+// (plan.md D2 flagged the SigV4A hazard; this is the concrete form it takes.)
+import '@aws-sdk/signature-v4a'
+
 export interface KvsStore {
   describe(kvsArn: string): Promise<{ etag: string }>
   updateKeys(input: {

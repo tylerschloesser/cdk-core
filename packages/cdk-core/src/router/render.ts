@@ -217,9 +217,14 @@ async function handler(event) {
 
 ${backendBlocks}
 
-  if (uri.slice(-1) === '/') uri = uri + 'index.html'
-  else if (uri.lastIndexOf('.') <= uri.lastIndexOf('/')) uri = uri + '/index.html'
-  request.uri = route.assets + uri
+  // SPA fallback. A path whose last segment carries no extension is a client
+  // route, not a file: it must serve the app shell, not <path>/index.html.
+  // Appending was the first version of this, and every deep route 403d --
+  // S3 answers a missing key AccessDenied rather than 404, because an OAC
+  // bucket policy grants s3:GetObject and not s3:ListBucket. A request for a
+  // genuinely missing *asset* still fails, which is what we want.
+  if (uri.lastIndexOf('.') <= uri.lastIndexOf('/')) request.uri = route.assets + '/index.html'
+  else request.uri = route.assets + uri
   return request
 }
 `

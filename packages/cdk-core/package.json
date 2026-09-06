@@ -45,6 +45,7 @@
   },
   "devDependencies": {
     "@aws-sdk/client-cloudfront-keyvaluestore": "catalog:",
+    "@aws-sdk/signature-v4a": "catalog:",
     "@types/aws-lambda": "catalog:",
     "@types/node": "catalog:",
     "aws-cdk-lib": "catalog:",
