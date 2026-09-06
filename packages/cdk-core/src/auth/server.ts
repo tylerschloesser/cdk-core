@@ -9,6 +9,7 @@
  * unset `AUTH` is `none`, and `getUser` returns `null`.
  */
 
+import { CognitoJwtVerifier } from 'aws-jwt-verify'
 import { ID_TOKEN_HEADER } from '../config.js'
 
 export { ID_TOKEN_HEADER } from '../config.js'
@@ -49,13 +50,64 @@ export interface Verifier {
   verify(idToken: string): Promise<AuthUser>
 }
 
+/** `https://cognito-idp.<region>.amazonaws.com/<poolId>` → `<poolId>`. */
+const ISSUER_PATTERN = /^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/([^/]+)$/
+
+function parseUserPoolId(issuer: string): string {
+  const match = ISSUER_PATTERN.exec(issuer)
+  if (!match) {
+    throw new Error(
+      `invalid Cognito issuer ${JSON.stringify(issuer)}: expected ` +
+        'https://cognito-idp.<region>.amazonaws.com/<poolId>',
+    )
+  }
+  return match[1]
+}
+
 /**
  * A Cognito ID-token verifier (`aws-jwt-verify`, `tokenUse: 'id'`, one client
- * id). Epoch 4.
+ * id). `aws-jwt-verify` wants a bare user pool id, not the issuer URL, so it
+ * is parsed out of `config.issuer` here rather than asked for separately —
+ * `AUTH_ISSUER` is the one value the constructs already emit (D4).
  */
 export function createVerifier(config: VerifierConfig): Verifier {
-  void config
-  throw new Error('not implemented: Epoch 4 (aws-jwt-verify)')
+  const userPoolId = parseUserPoolId(config.issuer)
+  const jwtVerifier = CognitoJwtVerifier.create({
+    userPoolId,
+    tokenUse: 'id',
+    clientId: config.clientId,
+  })
+  return {
+    async verify(idToken) {
+      const payload = await jwtVerifier.verify(idToken)
+      const { email } = payload
+      if (typeof email !== 'string') {
+        throw new Error('Cognito ID token missing "email" claim')
+      }
+      return { sub: payload.sub, email }
+    },
+  }
+}
+
+/**
+ * One verifier per (issuer, clientId), built once per process: `verify`
+ * caches the JWKS inside the instance, and a fresh instance per request would
+ * re-fetch it from Cognito every time. `resetVerifierCache` is a test seam.
+ */
+let verifierCache = new Map<string, Verifier>()
+
+export function resetVerifierCache(): void {
+  verifierCache = new Map()
+}
+
+function getCachedVerifier(config: VerifierConfig): Verifier {
+  const key = `${config.issuer}|${config.clientId}`
+  let verifier = verifierCache.get(key)
+  if (!verifier) {
+    verifier = createVerifier(config)
+    verifierCache.set(key, verifier)
+  }
+  return verifier
 }
 
 /**
@@ -75,8 +127,28 @@ export async function getUser(c: RequestLike): Promise<AuthUser | null> {
       return null
     case 'local':
       return parseDevToken(token)
-    case 'cognito':
-      throw new Error('not implemented: Epoch 4 (Cognito verification)')
+    case 'cognito': {
+      const issuer = process.env.AUTH_ISSUER
+      const clientId = process.env.AUTH_CLIENT_ID
+      if (!issuer || !clientId) {
+        throw new Error(
+          'AUTH=cognito requires AUTH_ISSUER and AUTH_CLIENT_ID; a Lambda ' +
+            'missing either is a deployment bug',
+        )
+      }
+      const verifier = getCachedVerifier({ issuer, clientId })
+      try {
+        return await verifier.verify(token)
+      } catch {
+        // An invalid token — expired, wrong signature, or (the case that
+        // matters) issued by a *different* pool — is an anonymous caller as
+        // far as a route is concerned: null, not a throw. The negative case
+        // is the interesting one: a preview-pool token presented to the prod
+        // API must come back null here because its `iss` does not match the
+        // prod pool this verifier was built for (D4).
+        return null
+      }
+    }
   }
 }
 

@@ -11,14 +11,14 @@ paths:
 
 # CDK, CloudFront, and the preview topology
 
-Loaded when you touch `infra/`, a construct or the router. Two neighbours: workflows, the
-deploy role and the sweeper are `.claude/rules/workflows.md`; the streaming contract and
-KeyValueStore writes are `.claude/rules/streaming-and-kvs.md`.
+Loaded when you touch `infra/`, a construct or the router. Three neighbours: `workflows.md`
+(workflows, the deploy role, the sweeper), `streaming-and-kvs.md` (the streaming contract and
+KVS writes) and `auth.md` (the user pools, Google, the machine user).
 
 Everything is **us-east-1** (CloudFront requires its ACM certificate there) in account
 `063257577013`. The `admin` profile has **no default region**: `env` is explicit in
-`bin/app.ts` and every CLI call needs `--region us-east-1`. Access is SSO —
-`aws sso login --profile admin`, then `AWS_PROFILE=admin`.
+`bin/app.ts` and every CLI call needs `--region us-east-1`. Access is SSO — `aws sso login
+--profile admin`, then `AWS_PROFILE=admin`.
 
 > The account hosts three other production sites. **Never `destroy` or `delete-stack` a name
 > you have not just read back from `aws cloudformation list-stacks`**, and never one that is
@@ -29,16 +29,18 @@ Everything is **us-east-1** (CloudFront requires its ACM certificate there) in a
 | Stack | Deployed by | Holds |
 | --- | --- | --- |
 | `CdkCoreShared` | `deploy.yml` and by hand | the one ACM certificate |
-| `CdkCorePreview` | `deploy.yml` (rarely changes) | `PreviewSite`: bucket, KVS, router function, distribution, wildcard DNS, SSM params |
+| `CdkCorePreview` | `deploy.yml` (rarely changes) | `PreviewSite`: bucket, KVS, router, distribution, wildcard DNS, SSM params, **preview pool + machine user** |
 | `CdkCore-pr-<n>` | `pr-preview.yml` per PR | the PR's Lambdas + `PreviewDeployment` |
-| `CdkCoreSite` | `deploy.yml` on main | `Site`: prod bucket, distribution, SPA function, apex DNS |
+| `CdkCoreSite` | `deploy.yml` on main | `Site`: prod bucket, distribution, SPA function, apex DNS, **the prod user pool** |
 | `CdkCoreGithubOidc` | **by hand, once** | `GithubDeployRole`; its `roleArn` is the `AWS_DEPLOY_ROLE_ARN` repo variable |
 
 - **PR stacks read SSM, not CloudFormation exports.** An `Fn::ImportValue` would make every
   open PR a dependent of `CdkCorePreview` — blocking changes to it and breaking
   `cdk deploy CdkCore-pr-<n> --exclusively`. `PreviewSite` publishes
-  `/cdk-core/<domain>/preview/{distributionArn,distributionId,bucketName,kvsArn}` and
-  `PreviewDeployment` reads them. The **certificate** is the exception: it crosses from
+  `/cdk-core/<domain>/preview/{distributionArn,distributionId,bucketName,kvsArn}` plus four
+  auth keys (`auth.md`), and `PreviewDeployment` reads them — taking an explicit
+  `auth: boolean`, because a missing parameter fails the *deploy*, not the synth. The
+  **certificate** is the exception: it crosses from
   `CdkCoreShared` to `CdkCorePreview` as a normal construct reference, because those two
   stacks change together and neither is per-PR.
 - **PR stacks are selected by context**: `cdk deploy CdkCore-pr-7 -c pr=7`. Without `-c pr=`,

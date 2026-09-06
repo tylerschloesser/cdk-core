@@ -199,6 +199,22 @@ export class GithubDeployRole extends Construct {
       }),
     )
 
+    // [Epoch 4] `pr-preview.yml` runs the e2e suite against the deployed
+    // preview, and the machine-auth fixture logs in as the preview pool's
+    // `claude` user — so CI, acting as this role, has to read that one secret.
+    // The name is fixed by `PreviewSite`; the trailing `-*` is Secrets
+    // Manager's own six-character ARN suffix, not a widening of the scope.
+    // `cognito-idp:InitiateAuth` is deliberately absent: it is an
+    // unauthenticated API, and the fixture calls it with `--no-sign-request`.
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${region}:${account}:secret:${props.domain}/preview-machine-user-*`,
+        ],
+      }),
+    )
+
     new CfnOutput(this, 'RoleArn', { value: role.roleArn })
   }
 }

@@ -19,7 +19,7 @@
  * of every one of those pushes. Prod is the opposite trade on both counts.
  */
 
-import { Annotations, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib'
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib'
 import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins'
@@ -34,9 +34,10 @@ import * as fs from 'node:fs'
 
 import { backendReadTimeoutSeconds } from './backend.js'
 import { backendBehavior, safeDistributionOverrides } from './behaviors.js'
-import type { SiteConfig } from './config.js'
+import type { SiteAuthConfig, SiteConfig } from './config.js'
 import { renderSpaSource } from './router/spa.js'
 import type { AuthEnvironment, AuthProps, BackendProps, SiteDomain } from './types.js'
+import { defaultDomainPrefix, siteUserPool } from './user-pool.js'
 
 /**
  * Files whose names are stable across builds and so must never be cached hard.
@@ -81,16 +82,6 @@ export class Site extends Construct {
   constructor(scope: Construct, id: string, props: SiteProps) {
     super(scope, id)
 
-    if (props.auth) {
-      Annotations.of(this).addWarningV2(
-        '@tylerschloesser/cdk-core:siteAuthNotImplemented',
-        'Site: `auth` is accepted but ignored until Epoch 4. No user pool or app client is ' +
-          'created, and backends run with AUTH unset (= none).',
-      )
-    }
-    // Epoch 4 fills this in from the prod pool.
-    this.authEnvironment = {}
-
     if (Object.keys(props.backends).length === 0) {
       throw new Error('Site: at least one backend is required')
     }
@@ -105,6 +96,35 @@ export class Site extends Construct {
     }
 
     this.url = `https://${props.domain}`
+
+    // ---- the prod user pool ----------------------------------------------
+    //
+    // What makes this pool safe is as much what it does *not* have as what it
+    // does: no native users, and an app client whose only auth flow is
+    // refresh. D6 calls machine sign-in "structurally impossible" here, and
+    // that is the shape of the claim — there is no flag to flip, because the
+    // password flow is not merely disabled, it is absent from
+    // `ExplicitAuthFlows`.
+    let authConfig: SiteAuthConfig | undefined
+    if (props.auth) {
+      const pool = siteUserPool(this, 'Auth', {
+        auth: props.auth,
+        domainPrefix: props.auth.domainPrefix ?? defaultDomainPrefix(props.domain),
+        userPoolName: props.domain,
+        callbackUrls: [`https://${props.domain}/auth/callback`],
+        logoutUrls: [`https://${props.domain}/`],
+      })
+      this.userPool = pool.userPool
+      this.userPoolClient = pool.userPoolClient
+      authConfig = pool.authConfig
+      this.authEnvironment = {
+        AUTH: 'cognito',
+        AUTH_ISSUER: pool.issuer,
+        AUTH_CLIENT_ID: pool.userPoolClient.userPoolClientId,
+      }
+    } else {
+      this.authEnvironment = {}
+    }
 
     // The bucket holds build output and nothing else — every byte in it is
     // reproducible from a deploy — so it is destroyable, and `cdk destroy` on
@@ -188,7 +208,7 @@ export class Site extends Construct {
 
     // ---- assets ----------------------------------------------------------
 
-    const config: SiteConfig = { site: props.domain, mode: 'prod' }
+    const config: SiteConfig = { site: props.domain, mode: 'prod', auth: authConfig }
     const unversioned = props.unversioned ?? DEFAULT_UNVERSIONED
     const source = s3deploy.Source.asset(props.webDist)
 
