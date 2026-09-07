@@ -147,10 +147,21 @@ To confirm a torn-down preview is actually gone from the outside:
 scripts/verify-preview.sh <n> --expect-absent
 ```
 
-This flips the same checks to expect 404 instead of 200. Give it about a minute after
-teardown before trusting a failure here — CloudFront edge caches can still serve a cached 200
-for a few seconds to a minute right after the origin disappears, and a run started too early
-can report false failures that a re-run a minute later won't.
+This flips the same checks to expect 404 instead of 200. **Do not trust a failure here until
+the stack delete has finished and another minute has passed.** `pr-teardown.yml` calls
+`delete-stack` and does not wait, on purpose, so the workflow going green means the delete
+*started*.
+
+What you see while you wait is **403**, not a stale 200, and on `/api/*` too — which is
+`CACHING_DISABLED`, so edge caching cannot explain it. The cause is KVS propagation: the key is
+already gone from the store (`list-keys` returns `[]` immediately) but some edges still resolve
+it, rewrite the request to `/pr-<n>/index.html` in a bucket where the object is gone, and get
+S3's `AccessDenied` — a 403 rather than a 404 because an OAC bucket policy grants `GetObject`
+and not `ListBucket`. Measured in Epoch 5: 1 of 7 checks passing while the stack was still
+deleting, 3 of 7 the moment it finished, 7 of 7 under a minute later.
+
+So the sequence that gives a trustworthy answer is: wait for `describe-stacks` to stop finding
+`<Prefix>-pr-<n>`, wait another minute, then run the check.
 
 ## What never to do
 

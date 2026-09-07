@@ -1430,9 +1430,15 @@ Ordered by how much of the plan they can invalidate. Each has an owner epoch.
    A new hazard took its place and is also closed: the bundled handler must import
    `@aws-sdk/signature-v4a` or every KVS call fails.
 3. **KVS propagation delay** has no SLA (D2). `pr-preview.yml` polls up to 5 min. **[revised,
-   Epoch 3] The poll exists and is green**, but has never actually had to wait long: four
-   preview deploys answered `/api/ping` on the first or an early attempt. The delay is
-   unmeasured, not absent.
+   Epoch 3] The poll exists and is green**, but has never actually had to wait long: many
+   preview deploys answered `/api/ping` on the first or an early attempt. **[revised, Epoch 5]
+   The *delete* side is now measured, and it is the visible one.** After `CdkCore-pr-9`'s stack
+   delete finished, `verify-preview.sh 9 --expect-absent` reported 3 of 7 checks passing and was
+   7 of 7 under a minute later; while the delete was still running it was 1 of 7. The residual
+   answer is **403 on `/api/*` as well**, which is `CACHING_DISABLED` — so this is not the edge
+   caching Epoch 4's handoff attributed it to. It is edges that still resolve a key `list-keys`
+   already reports gone, rewriting to a `/pr-<n>/` prefix whose objects are deleted, and getting
+   S3's `AccessDenied`. The create side remains unmeasured because it has never had to wait.
 4. ~~**URI-rewrite cache keys**~~ (D10). **[revised, Epoch 2] Closed — proven before anything
    depended on it**, with query strings excluded from the cache policy so the rewritten URI was
    the only differentiator.
