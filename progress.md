@@ -673,3 +673,234 @@ on each merge and deployed production; the final run, `34066566331`, is green an
 Final state of the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
 `CdkCoreGithubOidc`, and **no** `CdkCore-pr-*`. KVS `{"Items": []}`, preview bucket empty, no
 open PRs. `main` is the base for Epoch 4's branch.
+
+## Epoch 4 — Auth: Cognito + Google, the bounce, machine login, authenticated e2e — 2026-09-06 — DONE
+
+Google login works on production and on a preview, and Claude can sign into a preview with no
+browser and no Google account and then drive the UI as that user — including an authenticated
+SSE stream. The prod stack contains no password path, and that is now asserted from the
+outside rather than intended.
+
+Commits `d92b3e0..10313e2` on `epoch-4-auth` (PR #7), plus the handoff commit.
+
+### Shipped
+
+- **`packages/cdk-core/src/user-pool.ts`** (new) — `siteUserPool()`, the pool shape both site
+  constructs build: `selfSignUpEnabled: false`, `FeaturePlan.ESSENTIALS`, a password policy
+  with `requireSymbols: false`, `RemovalPolicy.DESTROY`, a Google IdP reading
+  `cdk-core/google-oauth` as two dynamic references, a hosted-UI prefix domain, and one
+  `browser` app client. Plus `defaultDomainPrefix()`.
+- **`Site.auth`** (`src/site.ts:100`) — the prod pool, `userPool`/`userPoolClient`,
+  `authEnvironment`, and `auth` in the deployed `__config.json`.
+- **`PreviewSite.auth`** (`src/preview-site.ts:196`, `createAuth`) — the preview pool, the
+  `machine` app client (`disableOAuth`, `authFlows: {userPassword: true}`), the
+  `<domain>/preview-machine-user` secret with a generated password, the `PoolUser` custom
+  resource, and four new SSM parameters: `authIssuer`, `authClientId`, `authDomain`,
+  `authMachineClientId`, `machineSecretArn` (five, see deviation 3).
+- **`applyPoolUser`** (`src/handlers/preview-resources.ts`) — `AdminCreateUser` (SUPPRESS) →
+  `readPassword` → `AdminSetUserPassword --permanent`, idempotent on
+  `UsernameExistsException`, delete-tolerant of `UserNotFound`/`ResourceNotFound`. Written
+  against a `PoolUserDirectory` interface, 8 unit tests against a fake.
+- **`src/handler-asset.ts`** (new) — one place that resolves the bundled handler, shared by
+  `PreviewSite` and `PreviewDeployment`.
+- **`auth/oidc.ts`** (new) + **`auth/browser.ts`** — PKCE S256, the D5 bounce `redirect_uri`
+  and `<nonce>.<pr>` state, `exchangeCode`/`refreshTokens`, a 5-minute refresh window with a
+  shared in-flight promise, `handleCallback` returning the return path. 22 unit tests
+  including the RFC 7636 Appendix B vector.
+- **`auth/server.ts`** — `createVerifier` on `aws-jwt-verify` (`tokenUse: 'id'`, the user pool
+  id parsed out of the issuer), cached per `(issuer, clientId)`, a comma-separated client
+  allowlist, and a `getUser` `cognito` branch that throws on missing env and returns `null` on
+  an invalid token. 17 unit tests.
+- **`apps/api/src/events.ts`** — `/events/tick` requires auth. **`apps/web/src/App.tsx`** — a
+  `sign in with Google` button in non-local mode, and the callback returns to `returnTo`.
+- **`e2e/fixtures.ts`** (new), `auth.spec.ts`, `sse.spec.ts` — `machineAuth`/`authedPage` and
+  the exported `TARGET`. **`scripts/preview-login.sh`** (new).
+- **`GithubDeployRole`** — `secretsmanager:GetSecretValue` on
+  `secret:<domain>/preview-machine-user-*` and nothing else new.
+- **`.claude/rules/auth.md`** (new); `cdk.md`, `workflows.md`, `testing.md` corrected.
+
+### Acceptance test
+
+```
+$ gh run list --branch epoch-4-auth --limit 2
+CI: success @ 10313e2
+PR Preview: success @ 10313e2          # 8 passed, 2 skipped — includes the auth spec,
+                                       # the prod-isolation negative test and authed SSE
+
+$ ./scripts/preview-login.sh 7 | xargs -I{} curl -fsS -H 'x-id-token: {}' https://pr-7.preview.cdk-core.ty.ler.dev/api/me
+xargs: command line cannot be assembled, too long        # the plan's form cannot work — see deviation 1
+
+$ curl -fsS -H "x-id-token: $(./scripts/preview-login.sh 7)" https://pr-7.preview.cdk-core.ty.ler.dev/api/me
+{"sub":"84e844c8-b021-70bb-da84-7ff387914192","email":"claude@cdk-core.ty.ler.dev"}
+
+$ curl -sS -o /dev/null -w '%{http_code}\n' -H "x-id-token: $(./scripts/preview-login.sh 7)" https://cdk-core.ty.ler.dev/api/me
+401
+
+$ aws cognito-idp describe-user-pool-client --user-pool-id us-east-1_havW5h4hk \
+    --client-id 7mrijhcfmdutdqbk5709dkf22l --query 'UserPoolClient.ExplicitAuthFlows'
+[
+    "ALLOW_REFRESH_TOKEN_AUTH"
+]
+
+$ aws cognito-idp list-users --user-pool-id us-east-1_havW5h4hk \
+    --query 'Users[?UserStatus!=`EXTERNAL_PROVIDER`]'
+[]
+```
+
+The manual half, done by the user: **Google login works on `https://cdk-core.ty.ler.dev` and
+on `https://pr-7.preview.cdk-core.ty.ler.dev`**, both landing back on the page signed in. The
+preview signed them in with no second consent screen — expected, and the visible upside of
+D4's one-Google-client-for-all-sites: the two *pools* are separate and their tokens live in
+separate origins' `localStorage`, but Google's session and consent grant are shared, so the
+second trip through `identity_provider=Google` is silent.
+
+Extra checks the plan did not ask for but which pin the parts a green suite would not
+distinguish:
+
+```
+bounce, valid PR      302 -> https://pr-7.preview.cdk-core.ty.ler.dev/auth/callback?code=abc123&state=Zm9vYmFy.7
+bounce, unknown PR    404      (state=….999999 — no KVS key)
+bounce, no state      404
+bounce, injected URL  404      (state=https://evil.example.com)
+anonymous /api/me, /events/tick, garbage token   401, 401, 401  (preview and prod)
+```
+
+**A6 is now met with auth.** Authenticated SSE through the preview distribution, 7 samples:
+1st→5th spread **median 2003 ms, range 2000–2003**; 1st→2nd **median 500 ms, range 499–501**,
+which is the producer's interval exactly — nothing buffers anywhere. Target was ≥ 400 ms.
+
+**A7 is met**, by the four lines above: refresh-only flows, zero native users, a preview token
+refused by production, and `/api/me` 401 for an anonymous caller.
+
+### Deviations from the plan
+
+1. **The acceptance test's `xargs -I{}` form cannot work, on macOS at least.** `xargs -I`
+   caps a replacement line at 255 bytes and a Cognito ID token is ~1050, so it fails with
+   `command line cannot be assembled, too long` before curl ever runs. `$(…)` is the form that
+   works and is what `.claude/rules/auth.md` and the plan now show.
+2. **CDK's `UserPoolClient` L2 cannot express "refresh only".** `configureAuthFlows` returns
+   `undefined` for an **empty** `authFlows` as well as an absent one, which omits
+   `ExplicitAuthFlows` from the template — and an omitted list makes Cognito apply its legacy
+   defaults, which include `ALLOW_USER_SRP_AUTH`. The plan's `authFlows: {}` **explicitly**
+   would therefore have produced the opposite of what it intended, silently. Pinned on the L1
+   (`cfnClient.explicitAuthFlows = ['ALLOW_REFRESH_TOKEN_AUTH']`) and asserted in
+   `site.test.ts`. (`authFlows: { userSrp: false }` also happens to work, by being non-empty;
+   it was rejected as too clever to survive a refactor.)
+3. **A preview API must trust *two* app clients, not one.** Measured, not inferred: the token
+   `scripts/preview-login.sh` mints carries the **machine** client as its `aud`, while
+   `authClientId` — what the browser authorizes with and what the Lambdas had — is the
+   **browser** client. A verifier given one 401s every call made with the other. `aud` is the
+   client that minted a token, not the pool, and the boundary that isolates prod from preview
+   is the pool (`iss`), so `AUTH_CLIENT_ID` became a comma-separated allowlist and
+   `PreviewSite` publishes `authMachineClientId` as a fifth parameter. The plan's D6 assumed
+   the machine token would simply be accepted.
+4. **`PreviewSite` publishes `authDomain` too.** The plan lists `authIssuer`, `authClientId`
+   and `machineSecretArn`. The hosted-UI host cannot be derived from the issuer, and the
+   browser needs it for both the authorize redirect and the token exchange.
+5. **`PreviewDeploymentProps` gained `auth?: boolean`.** A PR stack cannot detect whether the
+   site has a pool: `ssm.StringParameter.valueForStringParameter` on a parameter that does not
+   exist fails the *deploy*, not the synth, so there is nothing to branch on at build time.
+   The consumer already knows — it passed `auth` to `PreviewSite` in the same `bin/app.ts`.
+6. **The e2e suite has three targets, not two, and `.claude/rules/testing.md` is corrected.**
+   Production has no machine user and cannot have one — that *is* A7 — so `machineAuth` throws
+   there, the authenticated specs skip, and production asserts the 401 instead. The
+   consequence worth knowing: **`deploy.yml`'s post-deploy run can no longer exercise the
+   production SSE stream**, because `/events/tick` now requires auth. Epoch 3's unauthenticated
+   production measurement (2040 ms) stands; the authenticated one is now a preview measurement
+   plus a human clicking `stream` after a Google login.
+7. **A `test.skip` inside a test body is too late.** Playwright resolves a test's fixtures
+   before running the body, so the first production run failed three specs instead of skipping
+   them: `machineAuth` threw first. The skips are now at `test.describe` scope.
+8. **`vitest`'s 5 s default timeout is too small for the synth tests.** CI went red on two
+   tests whose assertions were all correct: `Template.fromStack` stages and zips every
+   `Code.fromAsset`, CDK's provider framework included, and on a two-core runner with a dozen
+   files in flight that exceeded 5 s. `testTimeout: 30_000` as a hang guard, and
+   `preview-site.test.ts` memoises its synth per `auth` value. The suite still takes ~3 s
+   locally.
+9. **`previewResourcesAssetPath()` special-cases being loaded from `src/`.** A vitest run
+   imports the constructs from source, where `dist/handlers/preview-resources` does not exist,
+   and `Code.fromAsset` throws `CannotFindAsset` before any assertion runs. It returns
+   `src/handlers` in that case — keyed on the *directory name*, not on "does the bundle
+   exist", so a real deploy from an unbuilt `dist/` still fails loudly.
+10. **`Site`/`PreviewSite` take an explicit `domainPrefix` in `infra/bin/app.ts`.** The
+    Construct API's default is the domain with dots → dashes (`cdk-core-ty-ler-dev`), but the
+    epoch's human-action text — and therefore the Google client's redirect URIs — says
+    `cdk-core` and `cdk-core-preview`. The value that has to match a human's console typing is
+    a literal in `bin/app.ts` with a comment saying why, not a derivation.
+11. **`CdkCoreSite` was deployed by hand before the PR merged**, exactly as in Epoch 3 and for
+    the same reason: the acceptance test needs a live prod pool to prove the negative against,
+    and a Cognito failure is better found on a 90-second local loop. `deploy.yml` re-deploys it
+    on merge.
+12. **`aws-jwt-verify` is a real `dependencies` entry**, not an optional peer like
+    `aws-cdk-lib`. It is zero-dependency and a Lambda importing `auth/server` from the
+    published tarball must get a working verifier with no extra install step.
+
+### Left undone / untested
+
+- **The refresh path has never refreshed a real Cognito token.** It is unit-tested against a
+  fake token endpoint and the window is 5 minutes against a 1-hour token, so no e2e run or
+  manual check has reached it. First real exercise is a browser tab left open for 55 minutes.
+- **`logout()` is local-only.** It clears `localStorage`; it does not call Cognito's `/logout`
+  endpoint, so the pool session (and Google's) survive. That is why the preview signed the user
+  in silently, and it is fine for this reference site — but a consumer who wants a real sign-out
+  needs the hosted-UI logout redirect, which is not implemented.
+- **Nothing has raced two PR deploys** (unchanged from Epoch 3).
+- **The sweeper has still never deleted anything** (A8, unchanged — Epoch 6 owes it).
+- **`CachePolicies.originDecides` is still unused** by the reference site.
+- The Google consent screen is still in **Testing**, with the user as the only test user.
+
+### AWS resources alive after this epoch
+
+`CdkCoreShared`, `CdkCorePreview` (now also the preview user pool `us-east-1_D9US7hu40`, the
+`browser` and `machine` clients, the `claude` user, the secret
+`cdk-core.ty.ler.dev/preview-machine-user`, and a second Lambda + provider for `PoolUser`),
+`CdkCoreSite` (now also the prod user pool `us-east-1_havW5h4hk` and its one client) and
+`CdkCoreGithubOidc`. Plus the account-level budget. Two user pools idle at $0; two secrets at
+$0.40/month each.
+
+To remove everything (the two secrets are *named*, so a plain stack delete leaves a 30-day
+tombstone that blocks recreating the name — force-delete them):
+
+```
+AWS_PROFILE=admin pnpm build
+AWS_PROFILE=admin pnpm --filter infra exec cdk destroy CdkCoreSite CdkCorePreview CdkCoreShared CdkCoreGithubOidc
+AWS_PROFILE=admin aws secretsmanager delete-secret --region us-east-1 \
+  --secret-id cdk-core.ty.ler.dev/preview-machine-user --force-delete-without-recovery
+AWS_PROFILE=admin aws secretsmanager delete-secret --region us-east-1 \
+  --secret-id cdk-core/google-oauth --force-delete-without-recovery
+gh variable delete AWS_DEPLOY_ROLE_ARN
+AWS_PROFILE=admin aws budgets delete-budget --account-id 063257577013 --region us-east-1 --budget-name account-monthly-10-usd
+```
+
+### What the next epoch needs to know
+
+- **The Cognito prefix domains are `cdk-core` and `cdk-core-preview`**, and they are literals
+  in `infra/bin/app.ts` because they must equal what was typed into the Google OAuth client's
+  redirect URIs. Changing either means editing the Google console in the same change, and the
+  failure mode is a `redirect_uri_mismatch` at Google with nothing in any AWS log. The
+  cheap pre-check, no browser needed: fetch the Cognito `/oauth2/authorize` URL, follow its
+  `Location`, and confirm Google answers with a sign-in page rather than `Error 400`.
+- **`AUTH_CLIENT_ID` is a comma-separated allowlist.** Anything that adds an app client to the
+  preview pool and wants the API to accept its tokens must add it there too.
+- **`deploy.yml`'s production e2e no longer covers the SSE stream** (deviation 6). If a future
+  epoch wants that back, the options are an unauthenticated health-stream route or a prod
+  machine user — and the second one deletes A7.
+- **Two secrets are named, not stack-owned, in the sense that matters**: deleting the stack
+  schedules them for deletion with a recovery window, and the name stays reserved until it
+  elapses. Recreating `CdkCorePreview` within 30 days of a destroy needs the force-delete
+  above first.
+- **`packages/cdk-core` now has a runtime `dependencies` block** (`aws-jwt-verify`). Epoch 5's
+  packaging work has to keep it there — an optional peer would ship a tarball whose
+  `auth/server` throws on import.
+- **The handler bundle grew from 1.1 MB to 1.4 MB** (Cognito + Secrets Manager clients). It is
+  uploaded on every PR deploy; repeat deploys still measured 33 s, so it has not cost anything
+  yet.
+- **`.claude/rules/cdk.md` is 132 lines**, over the ~120 `CLAUDE.md` asks for — it was already
+  130 before this epoch. Split it (origins/OAC is the natural seam) the next time it grows.
+- Epoch 5 still owes `npm login`, the plugin and the marketplace. Nothing else is owed by a
+  human for Epoch 5.
+- The repo is still **public**, and the account id, both zone ids, the preview
+  distribution/bucket/KVS ids, the deploy role ARN, GitHub's numeric ids and now **both user
+  pool ids and the two app client ids** are in tracked files. Pool and client ids are not
+  credentials — they appear in every authorize URL — but the confirm asked for after Epoch 1 is
+  still outstanding and this epoch added to it again.
