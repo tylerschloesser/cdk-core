@@ -203,7 +203,7 @@ assert data.get('pr') == $PR, f\"pr was {data.get('pr')!r}\"
 }
 
 # ---------------------------------------------------------------------------
-# 4. Buffered API: GET /api/ping -> 200, body contains "pong"
+# 4. Buffered API: GET /api/ping -> 200, body contains "pong!"
 # ---------------------------------------------------------------------------
 check_ping() {
   name="buffered API (GET /api/ping)"
@@ -217,11 +217,11 @@ check_ping() {
     report "$name" "FAIL" "expected 200, got $http_code"
     return
   fi
-  if ! grep -q '"pong"' "$body_file"; then
-    report "$name" "FAIL" "body does not contain \"pong\": $(cat "$body_file")"
+  if ! grep -q '"pong!"' "$body_file"; then
+    report "$name" "FAIL" "body does not contain \"pong!\": $(cat "$body_file")"
     return
   fi
-  report "$name" "PASS" "200, body contains \"pong\""
+  report "$name" "PASS" "200, body contains \"pong!\""
 }
 
 # ---------------------------------------------------------------------------
