@@ -27,13 +27,16 @@ export interface SweepDeps {
   /** e.g. ['pr-1/', 'pr-7/'] */
   listAssetPrefixes(): Promise<string[]>
   deleteAssetPrefix(prefix: string): Promise<void>
+  /** e.g. ['/aws/lambda/CdkCore-pr-1-ApiFn...'] */
+  listLogGroups(): Promise<string[]>
+  deleteLogGroup(name: string): Promise<void>
   /** Rejects if the lookup fails. */
   prState(n: number): Promise<'OPEN' | 'CLOSED' | 'MERGED'>
   log(line: string): void
 }
 
 export interface SweepRow {
-  readonly kind: 'stack' | 'key' | 'prefix'
+  readonly kind: 'stack' | 'key' | 'prefix' | 'log-group'
   readonly id: string
   readonly pr: number
   readonly action: 'deleted' | 'would-delete' | 'kept' | 'failed'
@@ -60,8 +63,8 @@ function isClosed(state: PrState): boolean {
 }
 
 /**
- * Memoizes `prState` per PR number so steps 2-4 can share one GitHub lookup
- * per PR instead of issuing up to three. This is purely an optimization: each
+ * Memoizes `prState` per PR number so steps 2-5 can share one GitHub lookup
+ * per PR instead of issuing up to four. This is purely an optimization: each
  * step still derives its own keep/delete decision from the (possibly cached)
  * result rather than from another step having run for the same PR — a key or
  * prefix whose stack never matched anything in step 1 still gets its own
@@ -114,12 +117,12 @@ export async function sweep(
 
   // The set of stacks that will still exist once this sweep is done: a
   // stack we actually delete (or, in --dry-run, would delete) drops out of
-  // it. Steps 3 and 4 key their orphan check off this set rather than the
-  // raw listing, so that a closed PR's key and prefix are recognized as
-  // orphans in the very same run that deletes its stack, without step 3 or
-  // 4 having to depend on step 2 having run for that PR — a key or prefix
-  // whose stack was never in the raw listing at all (already gone) is
-  // simply never in this set either.
+  // it. Steps 3, 4 and 5 key their orphan check off this set rather than the
+  // raw listing, so that a closed PR's key, prefix and log groups are
+  // recognized as orphans in the very same run that deletes its stack,
+  // without those steps having to depend on step 2 having run for that PR —
+  // a resource whose stack was never in the raw listing at all (already
+  // gone) is simply never in this set either.
   const stillLive = new Set(matchedStacks.map((s) => s.name))
 
   for (const { name, pr } of matchedStacks) {
@@ -227,7 +230,46 @@ export async function sweep(
     })
   }
 
-  // ---- 5: print ----
+  // ---- 5: CloudWatch log groups ----
+  //
+  // Lambda creates `/aws/lambda/<function-name>` on first invoke, so
+  // CloudFormation never owns the group and never deletes it with the stack
+  // (issue #12). Anchored at `^/aws/lambda/<prefix>-pr-` for the same safety
+  // reason as the stack pattern above, and with one extra constraint: the
+  // trailing `-` after the capture group. A log-group name carries a function
+  // suffix after the PR number, so without that hyphen `<prefix>-pr-1` would
+  // also match `<prefix>-pr-12-Foo`. The anchor is also what keeps the live
+  // `<prefix>Site-*` and `<prefix>Preview-*` groups — and the other
+  // production sites sharing `/aws/lambda/` in this account — out of reach.
+  const logGroupPattern = new RegExp(
+    `^/aws/lambda/${escapeRegExp(options.stackPrefix)}-pr-([0-9]+)-`,
+  )
+  const allLogGroups = await deps.listLogGroups()
+  for (const name of allLogGroups) {
+    const match = logGroupPattern.exec(name)
+    if (!match) {
+      deps.log(
+        `skip: log group ${name} does not match the pr-log-group anchor, leaving untouched`,
+      )
+      continue
+    }
+    await reconcileOrphan(options, prState, {
+      kind: 'log-group',
+      id: name,
+      pr: Number(match[1]),
+      stillLive,
+      rows,
+      onFailure: () => {
+        hadFailure = true
+      },
+      onLookupFailure: () => {
+        hadLookupFailure = true
+      },
+      del: () => deps.deleteLogGroup(name),
+    })
+  }
+
+  // ---- 6: print ----
   printTable(deps, rows)
 
   // Exit code rule: 0 only when nothing failed and, in --dry-run, nothing
@@ -242,7 +284,8 @@ export async function sweep(
 }
 
 /**
- * Shared orphan logic for a KVS key or an S3 prefix: a resource is an orphan
+ * Shared orphan logic for a KVS key, an S3 prefix or a log group: a resource
+ * is an orphan
  * when the stack for its PR is not (and will not remain) in `stillLive` and
  * the PR itself is closed/merged. Both conditions are evaluated independently
  * of whichever other step ran — a lookup failure keeps the resource, exactly
@@ -252,7 +295,7 @@ async function reconcileOrphan(
   options: SweepOptions,
   prState: (n: number) => Promise<PrState>,
   args: {
-    kind: 'key' | 'prefix'
+    kind: 'key' | 'prefix' | 'log-group'
     id: string
     pr: number
     stillLive: ReadonlySet<string>

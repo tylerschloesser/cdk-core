@@ -215,16 +215,20 @@
 >    be renamed without breaking publishing with no error on this side. `--provenance` is
 >    undocumented in `pnpm publish --help` but accepted; whether an attestation is produced is
 >    unknown until the first CI publish.
-> 38. **[Epoch 6] A torn-down PR stack leaves its CloudWatch log groups behind.** 55
->    `/aws/lambda/CdkCore-pr-*` groups survive, all with no retention, because Lambda creates
->    them and CloudFormation therefore does not own or delete them. `storedBytes` reads 0 for
->    all of them and that field lags, so read it as negligible rather than zero. Nothing in
->    A2's teardown claim costs money today, but the leak is unbounded and the sweeper does not
->    know about log groups. The fix — an explicit `logGroup` with `RemovalPolicy.DESTROY` —
->    cannot be deployed over the existing groups, so it needs them deleted first, which is why
->    teaching the sweeper to reclaim them is likely the better order. **Issue #12** carries the
->    measurement (65 groups, ~5 per PR stack, 23 of them from the *consumer's* functions rather
->    than the package's), both candidate fixes and an acceptance check.
+> 38. **[Epoch 6] [revised, issue #12 — fixed] A torn-down PR stack left its CloudWatch log
+>    groups behind, and the sweeper now reclaims them.** Lambda creates
+>    `/aws/lambda/<function-name>` on first invoke, so CloudFormation never owned the group and
+>    never deleted it with the stack. **65** `/aws/lambda/CdkCore-pr-*` groups had survived
+>    across PRs 1 and 3-11 (~5 per stack, 23 of them from the *consumer's* `functions` callback
+>    rather than the package's), all with `retentionInDays: null`, totalling **~68 KB** — the
+>    earlier "55" and "`storedBytes` reads 0 for all" were both wrong; pr-1's groups are
+>    nonzero. Negligible either way, but unbounded in time and growing with every PR on every
+>    site the package onboards, which is what made A2's zero-billable-resources claim false.
+>    Fixed sweeper-side (issue #12's option B): a fourth reconciliation step, anchored on the
+>    stack-name prefix, so it reaches the consumer's functions too and cannot fail a deploy.
+>    The construct-side fix (an explicit `logGroup` with `RemovalPolicy.DESTROY`, option A)
+>    stays a later option — it could not have deployed over the existing groups anyway, and the
+>    backlog that blocked it is now gone.
 > 39. **[Epoch 6] `pnpm --filter infra exec cdk-core sweep` prints a bare `undefined`** after
 >    the table whenever the sweep exits non-zero. It is pnpm's error reporting, not the
 >    sweeper: the same run as `node packages/cdk-core/dist/bin/sweep.js` is clean. Nobody had
@@ -408,9 +412,11 @@ the import site as load-bearing so nobody removes it as unused.
 
 **Decision.** `PreviewDeployment` (in the PR stack) owns a Lambda-backed custom resource that
 writes the KVS key on Create/Update and deletes it on Delete. No registration API. The GitHub
-Action does nothing to KVS. A daily `cleanup.yml` runs `cdk-core sweep`, which reconciles
-three things against GitHub PR state: CloudFormation stacks with the PR prefix, KVS keys, and
-S3 prefixes in the preview bucket.
+Action does nothing to KVS. A daily `cleanup.yml` runs `cdk-core sweep`, which **[revised, issue #12]** reconciles
+four things against GitHub PR state: CloudFormation stacks with the PR prefix, KVS keys, S3
+prefixes in the preview bucket, and the `/aws/lambda/<prefix>-pr-<n>-*` CloudWatch log groups
+Lambda creates on first invoke (which CloudFormation never owns, so a stack delete leaves them
+behind).
 
 **Why, versus the alternatives the prompt asked to compare.**
 - *Registration API* (a Lambda the PR stack calls): decoupled and cross-account capable, but a
@@ -450,10 +456,14 @@ been run rather than reasoned about**; each is annotated below.
 - *Stack `DELETE_FAILED`* (e.g. the custom resource Lambda was already gone): the sweeper
   retries `delete-stack`; if the key is still present with no stack, the sweeper deletes the
   key and the `pr-<n>/` prefix directly. The sweeper exits non-zero if anything remains.
-- *Sweeper safety*: prefix + anchored `^[0-9]+$` on the stack name, `gh pr view` must return
-  `CLOSED` or `MERGED` (a lookup failure means "leave it"), and the deploy role's
-  `cloudformation:DeleteStack` is IAM-scoped to `stack/<prefix>-pr-*`. `--dry-run` prints
-  without deleting and is what the acceptance test uses.
+- *Sweeper safety*: prefix + anchored `^[0-9]+$` on the stack name, the log-group anchor
+  `^/aws/lambda/<prefix>-pr-([0-9]+)-` (the trailing hyphen is what keeps the live
+  `<prefix>Site-*` and `<prefix>Preview-*` groups, and the other production sites sharing
+  `/aws/lambda/`, out of reach), `gh pr view` must return `CLOSED` or `MERGED` (a lookup
+  failure means "leave it"), and the deploy role's `cloudformation:DeleteStack` is IAM-scoped
+  to `stack/<prefix>-pr-*` with `logs:DeleteLogGroup` scoped the same way to
+  `log-group:/aws/lambda/<prefix>-pr-*`. `--dry-run` prints without deleting and is what the
+  acceptance test uses.
 
 ### D4. Cognito: one prod pool and one preview pool per site, one Google client for all sites
 
@@ -780,7 +790,10 @@ cdk-core sweep --site cdk-core.ty.ler.dev --stack-prefix CdkCore --repo tylersch
    (with ETag).
 4. `ListObjectsV2` with `Delimiter=/` on the preview bucket: any `pr-<n>/` prefix with no stack
    and closed PR → delete objects.
-5. Print a table of what was found/deleted/left; `--dry-run` deletes nothing and exits 0 only
+5. `DescribeLogGroups` with `logGroupNamePrefix=/aws/lambda/<prefix>-pr-` (paginated): any group
+   matching `^/aws/lambda/<prefix>-pr-([0-9]+)-` with no stack and closed PR → `DeleteLogGroup`.
+   Lambda, not CloudFormation, creates these, so nothing else ever deletes them.
+6. Print a table of what was found/deleted/left; `--dry-run` deletes nothing and exits 0 only
    if nothing *would* be deleted.
 
 ## Construct API
@@ -1547,7 +1560,8 @@ numbers in `progress.md` (the user adjusts the targets; these are proposals):
 - **Every AWS-creating epoch lists its teardown** and the handoff records the exact commands.
   A session never ends with a `-pr-<n>` stack alive unless `progress.md` says so and why.
 - **Three layers against leaks**: `pr-teardown.yml` on close; the daily sweeper across stacks,
-  KVS and S3; the deploy role's IAM scope so neither can touch anything else. Plus the $10
+  KVS, S3 and CloudWatch log groups; the deploy role's IAM scope so neither can touch anything
+  else. Plus the $10
   budget alarm from Epoch 3.
 - **Never** `delete-stack`/`destroy` a name not just read back from `list-stacks`; the
   account hosts three other production sites. `.claude/settings.json` does not allowlist any

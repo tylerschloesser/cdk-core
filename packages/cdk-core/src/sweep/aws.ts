@@ -55,11 +55,13 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 
 export function createSweepDeps(options: CreateSweepDepsOptions): SweepDeps {
-  // `stackPrefix` is accepted for symmetry with `SweepOptions` (and because
-  // the CLI has the flag in hand) but is not used below: `ListStacksCommand`
-  // has no server-side name filter, so `listPreviewStacks` returns every
-  // non-deleted stack and `reconcile.ts` applies the anchored prefix match.
-  const { site, repo, region } = options
+  // `stackPrefix` is used by exactly one method. `ListStacksCommand` has no
+  // server-side name filter, so `listPreviewStacks` returns every non-deleted
+  // stack; `DescribeLogGroupsCommand` does have one, so `listLogGroups`
+  // narrows with it. That narrowing is an optimization on top of, never
+  // instead of, the anchored pattern `reconcile.ts` applies to everything
+  // these methods return.
+  const { site, stackPrefix, repo, region } = options
 
   // Lazily constructed so a missing SSM parameter only breaks the KVS/S3
   // methods, not stack listing/deletion or PR lookups.
@@ -249,6 +251,47 @@ export function createSweepDeps(options: CreateSweepDepsOptions): SweepDeps {
             Delete: { Objects: batch.map((Key) => ({ Key })) },
           }),
         )
+      }
+    },
+
+    async listLogGroups() {
+      const { CloudWatchLogsClient, DescribeLogGroupsCommand } = await import(
+        '@aws-sdk/client-cloudwatch-logs'
+      )
+      const logs = new CloudWatchLogsClient({ region })
+      const names: string[] = []
+      let nextToken: string | undefined
+      do {
+        const response = await logs.send(
+          new DescribeLogGroupsCommand({
+            logGroupNamePrefix: `/aws/lambda/${stackPrefix}-pr-`,
+            nextToken,
+          }),
+        )
+        for (const group of response.logGroups ?? []) {
+          if (group.logGroupName) {
+            names.push(group.logGroupName)
+          }
+        }
+        nextToken = response.nextToken
+      } while (nextToken)
+      return names
+    },
+
+    async deleteLogGroup(name) {
+      const { CloudWatchLogsClient, DeleteLogGroupCommand } = await import(
+        '@aws-sdk/client-cloudwatch-logs'
+      )
+      const logs = new CloudWatchLogsClient({ region })
+      try {
+        await logs.send(new DeleteLogGroupCommand({ logGroupName: name }))
+      } catch (error) {
+        if ((error as { name?: unknown } | null)?.name === 'ResourceNotFoundException') {
+          // Same reason as `deleteKvsKey`: deleting a group that is already
+          // gone is success — a sweep must never wedge on cleanup.
+          return
+        }
+        throw error
       }
     },
 

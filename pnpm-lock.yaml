@@ -12,6 +12,9 @@ catalogs:
     '@aws-sdk/client-cloudfront-keyvaluestore':
       specifier: ^3.1127.0
       version: 3.1127.0
+    '@aws-sdk/client-cloudwatch-logs':
+      specifier: ^3.1127.0
+      version: 3.1127.0
     '@aws-sdk/client-cognito-identity-provider':
       specifier: ^3.1127.0
       version: 3.1127.0
@@ -207,6 +210,9 @@ importers:
       '@aws-sdk/client-cloudfront-keyvaluestore':
         specifier: 'catalog:'
         version: 3.1127.0
+      '@aws-sdk/client-cloudwatch-logs':
+        specifier: 'catalog:'
+        version: 3.1127.0
       '@aws-sdk/client-cognito-identity-provider':
         specifier: 'catalog:'
         version: 3.1127.0
@@ -266,6 +272,10 @@ packages:
 
   '@aws-sdk/client-cloudfront-keyvaluestore@3.1127.0':
     resolution: {integrity: sha512-Bx/KcY2lRI8k2qpzuXVg1MG57R7G5IkIKKkaIGbpIrgjKapHr72nX7EY3hGnDJqmkNrD7bJaCm9eclTbLuu0nA==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-cloudwatch-logs@3.1127.0':
+    resolution: {integrity: sha512-BhRRVPLSEAQ3Yep8izRyVaMfHk1inNHm1C4txBWoJQYDVE/EX/SAIxtnpaF9KZYZzgBn8l7CBXC616435E2vlw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-cognito-identity-provider@3.1127.0':
@@ -1215,6 +1225,17 @@ snapshots:
       '@aws-sdk/core': 3.977.9
       '@aws-sdk/credential-provider-node': 3.972.82
       '@aws-sdk/signature-v4-multi-region': 3.996.46
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/fetch-http-handler': 5.8.0
+      '@smithy/node-http-handler': 4.12.1
+      '@smithy/types': 4.18.0
+      tslib: 2.8.1
+
+  '@aws-sdk/client-cloudwatch-logs@3.1127.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/credential-provider-node': 3.972.82
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3
       '@smithy/fetch-http-handler': 5.8.0

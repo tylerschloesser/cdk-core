@@ -106,6 +106,31 @@ describe('GithubDeployRole', () => {
     }
   })
 
+  it('scopes logs:DeleteLogGroup to /aws/lambda/<stackPrefix>-pr-* and never to *', () => {
+    const template = synth(baseProps)
+    const policies = template.findResources('AWS::IAM::Policy')
+    const statements = Object.values(policies).flatMap(
+      (policy) => policy.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>,
+    )
+
+    const deleteLogGroupStatements = statements.filter((statement) => {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+      return actions.includes('logs:DeleteLogGroup')
+    })
+
+    expect(deleteLogGroupStatements).toHaveLength(1)
+    const resources = deleteLogGroupStatements[0]
+    const resourceList = Array.isArray(resources?.Resource)
+      ? resources.Resource
+      : [resources?.Resource]
+    expect(resourceList).toHaveLength(1)
+    expect(resourceList[0]).toMatch(/:log-group:\/aws\/lambda\/TestPrefix-pr-\*$/)
+
+    for (const resource of resourceList) {
+      expect(resource).not.toBe('*')
+    }
+  })
+
   it('lists exactly the four cloudfront-keyvaluestore actions', () => {
     const template = synth(baseProps)
     const policies = template.findResources('AWS::IAM::Policy')

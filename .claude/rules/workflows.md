@@ -44,7 +44,15 @@ It deletes nothing on a healthy account, so a green run says nothing. To re-prov
 account on purpose: `cdk deploy CdkCore-pr-<n> --exclusively -c pr=<n>` for an **already-closed**
 PR number, and separately hand-write a KVS key and a `pr-<m>/` S3 object under a *different*
 closed PR. Both halves are needed — a stack delete removes its own key and prefix, so an
-orphaned stack alone exercises one of the three paths and hides the other two.
+orphaned stack alone exercises one of the four paths and hides the others.
+
+**Log groups are the fourth path (issue #12), and re-proving them needs an *invoke*, not just a
+deploy.** Lambda creates `/aws/lambda/<function-name>` on first invoke, so deploying a PR stack
+alone produces only the ~3 deploy-time custom-resource groups; run `scripts/verify-preview.sh
+<n>` against it to make `ApiFn`/`EventsFn` materialize theirs (~5 total). Then `delete-stack` —
+which leaves every one of them behind, since CloudFormation never owned them — and sweep. The
+groups are the one resource a stack delete does *not* take with it, so unlike the KVS key and
+the S3 prefix, an orphaned stack is a perfectly good fixture for this path.
 
 **`pnpm --filter infra exec cdk-core sweep` prints a bare `undefined` after the table** whenever
 the sweep exits non-zero. That is pnpm's error reporting, not the sweeper; `node
@@ -84,10 +92,18 @@ provenance attestation.
     `workflow_dispatch` from any other branch is refused at `sts:AssumeRoleWithWebIdentity`
     with `Not authorized to perform sts:AssumeRoleWithWebIdentity`. Testing a workflow change
     from a branch therefore does not work; open a PR, or change the trust policy on purpose.
-2. **`cloudformation:DeleteStack` is IAM-scoped to `stack/CdkCore-pr-*`.** Verified with
+2. **`cloudformation:DeleteStack` is IAM-scoped to `stack/CdkCore-pr-*`, and
+    `logs:DeleteLogGroup` to `log-group:/aws/lambda/CdkCore-pr-*`.** Verified with
     `aws iam simulate-principal-policy`: **implicitDeny** on `YahnAppStack-prod`,
-    `ThaiLerDevSiteStack`, `CDKToolkit` and `CdkCoreSite`; **allowed** only on a PR stack. That
-    is the guard that survives someone rewriting the sweeper or a workflow, so re-run the
+    `ThaiLerDevSiteStack`, `CDKToolkit` and `CdkCoreSite`; **allowed** only on a PR stack.
+    Same simulate for `logs:DeleteLogGroup` after issue #12: **allowed** on
+    `log-group:/aws/lambda/CdkCore-pr-11-ApiFn` (and on its `…:*` form — the ARN-suffix
+    variant is *not* needed as a second resource), **implicitDeny** on the live
+    `/aws/lambda/CdkCoreSite-ApiFnE0725F78-…` and
+    `/aws/lambda/CdkCorePreview-PreviewPoolUserHandler6CDD0623-…`. `logs:DescribeLogGroups` is
+    `*` on purpose — read-only, returns names, no resource-level permissions — mirroring
+    `cloudformation:ListStacks`.
+    That is the guard that survives someone rewriting the sweeper or a workflow, so re-run the
     simulate if the role's policy changes.
 3. **`pr-teardown.yml` has no checkout, so `gh` needs `GH_REPO`.** With no git remote,
     `gh pr comment` exits 1 with `failed to run git: fatal: not a git repository` — after the

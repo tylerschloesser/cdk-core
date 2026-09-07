@@ -141,10 +141,11 @@ A bin, `cdk-core`, installed with the package:
 cdk-core sweep --site example.com --stack-prefix Example --repo you/example [--dry-run] [--region us-east-1]
 ```
 
-Reconciles three things against GitHub's PR state: CloudFormation stacks matching
-`^<prefix>-pr-(\d+)$`, KVS keys in the preview store, and `pr-<n>/` prefixes in the preview
-bucket. Anything whose PR is closed or merged, and that a live stack no longer accounts for, is
-deleted. `--dry-run` deletes nothing and exits non-zero if it *would* delete something, so a
+Reconciles four things against GitHub's PR state: CloudFormation stacks matching
+`^<prefix>-pr-(\d+)$`, KVS keys in the preview store, `pr-<n>/` prefixes in the preview bucket,
+and CloudWatch log groups matching `^/aws/lambda/<prefix>-pr-(\d+)-` (which Lambda creates on
+first invoke, so CloudFormation never deletes them with the stack). Anything whose PR is closed
+or merged, and that a live stack no longer accounts for, is deleted. `--dry-run` deletes nothing and exits non-zero if it *would* delete something, so a
 green dry run is a positive statement that nothing is orphaned.
 
 ## Hostnames

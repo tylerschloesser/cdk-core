@@ -96,13 +96,16 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
    210.4 ms — a per-pair delta of **-5.2 ms**. The KVS read and `updateRequestOrigin()` are
    under the noise floor.
 
-**A deleted PR stack leaves its CloudWatch log groups behind.** Lambda creates
-`/aws/lambda/<stack>-*` on first invoke, so CloudFormation never owns it and never deletes it;
-55 survive today, all with no retention, and the sweeper does not know about log groups.
-Nothing measurable is billed. The fix is an explicit `logGroup` with `RemovalPolicy.DESTROY` on
-each function — which **cannot deploy over an existing group**, so the orphans have to be
-deleted first, and it does not reach the functions a *consumer* declares. Issue #12 has the
-numbers and the sweeper-side alternative.
+**A deleted PR stack leaves its CloudWatch log groups behind — the sweeper reclaims them, the
+constructs do not.** Lambda creates `/aws/lambda/<function-name>` on first invoke, so
+CloudFormation never owns the group and never deletes it with the stack. 65 had accumulated
+(~68 KB, no retention) before issue #12 was fixed sweeper-side: `cdk-core sweep` has a fourth
+step matching `^/aws/lambda/<prefix>-pr-([0-9]+)-`, described in `.claude/rules/workflows.md`
+(this rule's `paths` do not cover `sweep/**`). So **do not** "fix" this by adding an explicit
+`logGroup` with `RemovalPolicy.DESTROY` to a function here without reading issue #12 first: it
+cannot deploy over an existing group, it does not reach the functions a *consumer* declares,
+and it puts a new way to fail on the critical path of every preview deploy. It remains a
+possible later addition, not a replacement for the sweeper step.
 
 The origin side — OAC, the invoke permissions, the POST payload hash, and the order a
 distribution has to be deleted in — is `.claude/rules/cloudfront-origins.md`.

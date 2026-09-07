@@ -19,7 +19,10 @@ export interface GithubDeployRoleProps {
   readonly repo: string
   /** 'cdk-core-github-deploy' */
   readonly roleName: string
-  /** Stack-name prefix; `DeleteStack` is scoped to `<stackPrefix>-pr-*`. */
+  /**
+   * Stack-name prefix. `DeleteStack` is scoped to `<stackPrefix>-pr-*`, and
+   * `DeleteLogGroup` to `/aws/lambda/<stackPrefix>-pr-*`.
+   */
   readonly stackPrefix: string
   /** Used to scope the KVS and preview-bucket permissions via SSM lookups. */
   readonly domain: string
@@ -211,6 +214,28 @@ export class GithubDeployRole extends Construct {
         actions: ['secretsmanager:GetSecretValue'],
         resources: [
           `arn:aws:secretsmanager:${region}:${account}:secret:${props.domain}/preview-machine-user-*`,
+        ],
+      }),
+    )
+
+    // [Issue #12] Lambda creates `/aws/lambda/<function-name>` on first
+    // invoke, so CloudFormation never owns a PR stack's log groups and never
+    // deletes them with the stack — the sweeper reclaims them instead. Same
+    // split as `ListStacks`/`DeleteStack` above and for the same reason:
+    // `DescribeLogGroups` supports no resource-level permissions (it is
+    // read-only and returns names), while `DeleteLogGroup` is the action that
+    // has to be scoped, and is.
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['logs:DescribeLogGroups'],
+        resources: ['*'],
+      }),
+    )
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['logs:DeleteLogGroup'],
+        resources: [
+          `arn:aws:logs:${region}:${account}:log-group:/aws/lambda/${props.stackPrefix}-pr-*`,
         ],
       }),
     )
