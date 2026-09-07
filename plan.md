@@ -221,7 +221,10 @@
 >    all of them and that field lags, so read it as negligible rather than zero. Nothing in
 >    A2's teardown claim costs money today, but the leak is unbounded and the sweeper does not
 >    know about log groups. The fix — an explicit `logGroup` with `RemovalPolicy.DESTROY` —
->    cannot be deployed over the existing groups, so it needs them deleted first.
+>    cannot be deployed over the existing groups, so it needs them deleted first, which is why
+>    teaching the sweeper to reclaim them is likely the better order. **Issue #12** carries the
+>    measurement (65 groups, ~5 per PR stack, 23 of them from the *consumer's* functions rather
+>    than the package's), both candidate fixes and an acceptance check.
 > 39. **[Epoch 6] `pnpm --filter infra exec cdk-core sweep` prints a bare `undefined`** after
 >    the table whenever the sweep exits non-zero. It is pnpm's error reporting, not the
 >    sweeper: the same run as `node packages/cdk-core/dist/bin/sweep.js` is clean. Nobody had

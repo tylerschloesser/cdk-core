@@ -1339,7 +1339,11 @@ The stacks' *own* keys and prefixes are removed by their stack deletes, which is
   break A2 in any way that costs money today, but it is unbounded in time and the sweeper
   does not know about log groups. Fixing it means giving the Lambdas an explicit `logGroup`
   with `RemovalPolicy.DESTROY` — which will fail to deploy over an existing group, so the
-  orphans must be deleted first. Left for a decision rather than done late in an epoch.
+  orphans must be deleted first. Left for a decision rather than done late in an epoch, and
+  written up as **issue #12**: the count is now 65 (~5 per PR stack, and 23 of them belong to
+  the *consumer's* `ApiFn`/`EventsFn`, which a construct-side fix does not reach), with the
+  sweeper-side alternative recommended because it clears the backlog instead of being blocked
+  by it.
 - **The `new-site` checklist has still never been walked on a real second repo.** Skipped by
   the user's explicit decision this session: it needs a new repo, a second domain and a full
   set of AWS resources, and is most of a session on its own. A3's human-actions half stays
@@ -2078,7 +2082,11 @@ The stacks' *own* keys and prefixes are removed by their stack deletes, which is
   break A2 in any way that costs money today, but it is unbounded in time and the sweeper
   does not know about log groups. Fixing it means giving the Lambdas an explicit `logGroup`
   with `RemovalPolicy.DESTROY` — which will fail to deploy over an existing group, so the
-  orphans must be deleted first. Left for a decision rather than done late in an epoch.
+  orphans must be deleted first. Left for a decision rather than done late in an epoch, and
+  written up as **issue #12**: the count is now 65 (~5 per PR stack, and 23 of them belong to
+  the *consumer's* `ApiFn`/`EventsFn`, which a construct-side fix does not reach), with the
+  sweeper-side alternative recommended because it clears the backlog instead of being blocked
+  by it.
 - **The `new-site` checklist has still never been walked on a real second repo.** Skipped by
   the user's explicit decision this session: it needs a new repo, a second domain and a full
   set of AWS resources, and is most of a session on its own. A3's human-actions half stays

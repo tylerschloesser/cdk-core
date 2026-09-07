@@ -101,7 +101,8 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
 55 survive today, all with no retention, and the sweeper does not know about log groups.
 Nothing measurable is billed. The fix is an explicit `logGroup` with `RemovalPolicy.DESTROY` on
 each function — which **cannot deploy over an existing group**, so the orphans have to be
-deleted first.
+deleted first, and it does not reach the functions a *consumer* declares. Issue #12 has the
+numbers and the sweeper-side alternative.
 
 The origin side — OAC, the invoke permissions, the POST payload hash, and the order a
 distribution has to be deleted in — is `.claude/rules/cloudfront-origins.md`.
