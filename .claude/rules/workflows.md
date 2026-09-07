@@ -68,6 +68,13 @@ curl -fsS https://registry.npmjs.org/<pkg>/<version> > /dev/null && echo live
 
 The version number is spent either way — a retry has to bump.
 
+Two things about the npm the workflow installs. `npm install -g npm@latest` now resolves to
+**npm 12**, whose engine range is `^22.22.2 || ^24.15.0 || >=26.0.0` — it works because
+`setup-node`'s `node-version: 22` gives a recent 22.x, but pinning an older node would break
+that step. And `npm stage` only exists from npm 12, so approving a staged release locally needs
+`npx -y npm@latest stage list <pkg>` unless the local npm is current; `npm stage approve` takes
+the **stage id** from that listing, not a package spec.
+
 ## The things that bit
 
 1. **The deploy role trusts `ref:refs/heads/main` and `pull_request`, and nothing else.** A

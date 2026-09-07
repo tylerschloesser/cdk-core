@@ -1331,7 +1331,11 @@ The stacks' *own* keys and prefixes are removed by their stack deletes, which is
   @tylerschloesser/cdk-core@0.1.1` promotes it. If it is *not* queued, then pnpm's success
   message is wrong about something else and the publish path is not yet trustworthy.
   **`v0.1.1` is tagged and `package.json` says 0.1.1, so the version number is spent either
-  way** — a re-publish attempt has to go to 0.1.2.
+  way** — a re-publish attempt has to go to 0.1.2. Note `npm stage` exists only from **npm 12**;
+  a local npm 11 answers `Unknown command: "stage"`, so use `npx -y npm@latest stage list
+  <pkg>`. `npm install -g npm@latest` in `publish.yml` therefore installs npm 12, whose engine
+  range is `^22.22.2 || ^24.15.0 || >=26.0.0` — fine on `setup-node`'s current 22.x, but that
+  step would break under a pinned older node.
 - **Teardown leaves 55 orphaned CloudWatch log groups.** `/aws/lambda/CdkCore-pr-*` survives
   its stack because Lambda, not CloudFormation, creates the group; all 55 have
   `retentionInDays: null` (never expire). `describe-log-groups` reports `storedBytes: 0` for
