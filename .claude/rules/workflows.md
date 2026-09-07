@@ -12,7 +12,7 @@ Loaded when you touch a workflow, a workflow template, the OIDC role or the swee
 side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, KVS writes are
 `.claude/rules/streaming-and-kvs.md`, and the user pools are `.claude/rules/auth.md`.
 
-## The five workflows
+## The six workflows
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
@@ -21,6 +21,7 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
 | `pr-preview.yml` | PR opened/synchronize/reopened | `cdk deploy CdkCore-pr-$PR --exclusively -c pr=$PR`, poll the preview, e2e, sticky comment with URL + timings |
 | `pr-teardown.yml` | PR closed | `delete-stack`, no wait. No checkout, no build, no CDK |
 | `cleanup.yml` | daily cron, dispatch | `pnpm --filter infra exec cdk-core sweep` |
+| `publish.yml` | push of tag `v*`, dispatch with `dry_run` | verify tag matches `package.json` version, `pnpm verify`, `consumer-smoke.sh --pack`, `pnpm publish --provenance --no-git-checks` to npm via OIDC. **No AWS**, and the only one authenticating to npm instead |
 
 - **Everything that touches CloudFormation is `cancel-in-progress: false`**, and
   `pr-teardown.yml` shares `pr-preview.yml`'s concurrency group so a close can never race a
@@ -30,7 +31,8 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
   `plugins/cdk-core/skills/new-site/templates/workflows/`, or `test/workflow-templates.test.ts` fails.
   It renders each template with this repo's values and asserts **byte** equality, and it pairs
   the two directories by "the workflow requests `id-token: write`" — which is what
-  distinguishes an AWS-touching workflow from `ci.yml`.
+  distinguishes a workflow that authenticates by OIDC (to AWS, or to npm for `publish.yml`)
+  from `ci.yml`, the one workflow with no OIDC exchange at all.
 - **`deploy.yml` runs on every push to `main`**, so merging an epoch branch deploys production.
   A broken `main` is a broken prod site.
 - `actionlint .github/workflows/*.yml` before committing one. Its embedded shellcheck is why
@@ -67,4 +69,15 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
     (with the unversioned globs excluded), `false` on the unversioned half. `true` on the
     second deletes every hashed asset the first just uploaded, because it only *includes* those
     globs.
+7. **`publish.yml`'s filename is pinned by npm's trusted-publisher config**, which is
+    configured against a workflow *filename* on npmjs.com, not its contents. Renaming the file
+    breaks publishing silently from this repo's side — the workflow still runs and still fails,
+    but only at the npm OIDC exchange, far from whatever renamed it.
+8. **`publish.yml` uses `pnpm publish`, never `npm publish`**, for the same `catalog:` reason
+    as everywhere else in this repo (typescript-config.md) — plus `--no-git-checks`, because a
+    tag checks out as a detached HEAD and pnpm's default publish-branch check assumes
+    `master`, so without it every tag-triggered publish fails before touching npm.
+9. **pnpm/pnpm#11513 (an OIDC 404 on publish) was an outdated `pnpm/action-setup`, not a pnpm
+    bug** — fixed by upgrading the action, not by changing the publish command. This repo
+    already pins `pnpm/action-setup@v6`; do not "fix" a future OIDC failure by downgrading it.
 
