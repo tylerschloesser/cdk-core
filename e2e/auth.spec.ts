@@ -50,11 +50,17 @@ test.describe(() => {
 // renders 'claude@local' or 'claude@<site>'. No branching — the fixture is
 // where the difference lives (plan.md D6). Production is skipped because it
 // has no machine user at all, which is the point of A7.
-test('a machine-authed page reads back the signed-in user', async ({ authedPage, machineAuth }) => {
+// The skip is at *declaration* scope, not inside the body: Playwright resolves
+// a test's fixtures before it runs the body, so an in-body `test.skip` comes
+// too late — `machineAuth` would already have thrown. Same below.
+test.describe(() => {
   test.skip(TARGET === 'prod', 'production has no machine user — that is A7, not a gap')
-  await authedPage.goto('/')
 
-  await expect(authedPage.getByTestId('user')).toHaveText(machineAuth.email)
+  test('a machine-authed page reads back the signed-in user', async ({ authedPage, machineAuth }) => {
+    await authedPage.goto('/')
+
+    await expect(authedPage.getByTestId('user')).toHaveText(machineAuth.email)
+  })
 })
 
 // Preview-only: this is the assertion that proves the two Cognito pools are
@@ -62,11 +68,13 @@ test('a machine-authed page reads back the signed-in user', async ({ authedPage,
 // it is signed by a different issuer than the prod verifier trusts, so no
 // flag or config anywhere makes it work. `request` (not the page) so the
 // call never goes through the preview's own origin.
-test('a preview token is rejected by production', async ({ machineAuth, request }) => {
+test.describe(() => {
   test.skip(TARGET !== 'preview', 'needs a preview token and a live production API')
 
-  const res = await request.get('https://cdk-core.ty.ler.dev/api/me', {
-    headers: { 'x-id-token': machineAuth.idToken },
+  test('a preview token is rejected by production', async ({ machineAuth, request }) => {
+    const res = await request.get('https://cdk-core.ty.ler.dev/api/me', {
+      headers: { 'x-id-token': machineAuth.idToken },
+    })
+    expect(res.status()).toBe(401)
   })
-  expect(res.status()).toBe(401)
 })

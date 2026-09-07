@@ -30,32 +30,38 @@ import { expect, test, TARGET } from './fixtures.js'
  * production streaming path was measured unauthenticated in Epoch 3 and is
  * re-checked by hand after a Google login.
  */
-test('sse events arrive incrementally, not in one buffered flush', async ({ authedPage }) => {
+// Declaration scope, not inside the body: fixtures are resolved before a test
+// body runs, and `machineAuth` throws against prod rather than yielding a
+// token that would 401 later.
+test.describe(() => {
   test.skip(TARGET === 'prod', 'production has no machine user — that is A7, not a gap')
-  await authedPage.goto('/')
 
-  await authedPage.getByTestId('stream').click()
+  test('sse events arrive incrementally, not in one buffered flush', async ({ authedPage }) => {
+    await authedPage.goto('/')
 
-  const events = authedPage.getByTestId('stream-event')
-  await expect(events).toHaveCount(5, { timeout: 20_000 })
+    await authedPage.getByTestId('stream').click()
 
-  expect(await events.allTextContents()).toEqual(['1', '2', '3', '4', '5'])
+    const events = authedPage.getByTestId('stream-event')
+    await expect(events).toHaveCount(5, { timeout: 20_000 })
 
-  const receivedAt = await events.evaluateAll((nodes) =>
-    nodes.map((node) => Number(node.getAttribute('data-received-at'))),
-  )
-  expect(receivedAt.every((t) => Number.isFinite(t) && t > 0)).toBe(true)
+    expect(await events.allTextContents()).toEqual(['1', '2', '3', '4', '5'])
 
-  const spread = receivedAt[4]! - receivedAt[0]!
-  const secondGap = receivedAt[1]! - receivedAt[0]!
+    const receivedAt = await events.evaluateAll((nodes) =>
+      nodes.map((node) => Number(node.getAttribute('data-received-at'))),
+    )
+    expect(receivedAt.every((t) => Number.isFinite(t) && t > 0)).toBe(true)
 
-  expect(spread, `1st→5th spread was ${spread}ms; a buffered response collapses this to ~0`).toBeGreaterThanOrEqual(400)
-  expect(secondGap, `1st→2nd gap was ${secondGap}ms`).toBeLessThanOrEqual(1500)
+    const spread = receivedAt[4]! - receivedAt[0]!
+    const secondGap = receivedAt[1]! - receivedAt[0]!
 
-  // Arrival order must match emission order, or the parser is reordering frames.
-  for (let i = 1; i < receivedAt.length; i++) {
-    expect(receivedAt[i]!).toBeGreaterThanOrEqual(receivedAt[i - 1]!)
-  }
+    expect(spread, `1st→5th spread was ${spread}ms; a buffered response collapses this to ~0`).toBeGreaterThanOrEqual(400)
+    expect(secondGap, `1st→2nd gap was ${secondGap}ms`).toBeLessThanOrEqual(1500)
+
+    // Arrival order must match emission order, or the parser is reordering frames.
+    for (let i = 1; i < receivedAt.length; i++) {
+      expect(receivedAt[i]!).toBeGreaterThanOrEqual(receivedAt[i - 1]!)
+    }
+  })
 })
 
 // Proves the endpoint is actually protected, not merely reachable: no token
