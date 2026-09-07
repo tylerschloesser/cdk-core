@@ -7,6 +7,18 @@
 #
 # Usage:
 #   scripts/verify-preview.sh <pr-number> [--domain cdk-core.ty.ler.dev] [--expect-absent]
+#                             [--id-token <token>]
+#
+# `/events/*` has required a Cognito ID token since Epoch 4, so the SSE check
+# has two modes. With no token it asserts the endpoint answers **401**, which
+# is a real check — it is the outside proof that the preview API enforces auth
+# — and it keeps this script credential-free. With `--id-token` (or
+# `CDK_CORE_ID_TOKEN`) it streams and times the frames as before:
+#
+#   scripts/verify-preview.sh 8 --id-token "$(scripts/preview-login.sh 8)"
+#
+# Minting that token is the only part that needs AWS credentials, and it
+# happens outside this script on purpose.
 #
 # With --expect-absent, checks 1-6 are expected to fail with 404 (the preview
 # has been torn down) and the script exits 0 only if every one of them 404s.
@@ -16,9 +28,10 @@ set -euo pipefail
 DOMAIN="cdk-core.ty.ler.dev"
 PR=""
 EXPECT_ABSENT=0
+ID_TOKEN="${CDK_CORE_ID_TOKEN:-}"
 
 usage() {
-  echo "Usage: $0 <pr-number> [--domain cdk-core.ty.ler.dev] [--expect-absent]" >&2
+  echo "Usage: $0 <pr-number> [--domain cdk-core.ty.ler.dev] [--expect-absent] [--id-token <token>]" >&2
   exit 2
 }
 
@@ -32,6 +45,12 @@ while [ $# -gt 0 ]; do
       ;;
     --expect-absent)
       EXPECT_ABSENT=1
+      shift
+      ;;
+    --id-token)
+      shift
+      [ $# -gt 0 ] || usage
+      ID_TOKEN="$1"
       shift
       ;;
     -h|--help)
@@ -242,8 +261,9 @@ check_echo() {
 }
 
 # ---------------------------------------------------------------------------
-# 6. SSE: curl -N /events/tick?n=5, at least 5 `event: tick` frames,
-#    1st->5th spread >= 0.4s, 1st->2nd gap <= 1.5s.
+# 6. SSE: with an ID token, curl -N /events/tick?n=5, at least 5 `event: tick`
+#    frames, 1st->5th spread >= 0.4s, 1st->2nd gap <= 1.5s. Without one, the
+#    endpoint must answer 401.
 # ---------------------------------------------------------------------------
 check_sse() {
   name="SSE stream (GET /events/tick?n=5)"
@@ -260,11 +280,26 @@ check_sse() {
     return
   fi
 
+  # No token: assert the endpoint refuses. `/events/*` requires a Cognito ID
+  # token (Epoch 4), so an unauthenticated 200 here would mean the preview API
+  # had stopped enforcing auth — that is the thing worth checking, and it is
+  # the only thing checkable without credentials.
+  if [ -z "$ID_TOKEN" ]; then
+    http_code="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -N "$BASE/events/tick?n=5" || true)"
+    http_code="${http_code:-000}"
+    if [ "$http_code" = "401" ]; then
+      report "$name" "PASS" "401 without a token, as required; pass --id-token to stream"
+    else
+      report "$name" "FAIL" "expected 401 without a token, got $http_code"
+    fi
+    return
+  fi
+
   # curl -N streams to stdout; pipe into python3, which timestamps each
   # `event: tick` line as it is read and prints the verdict as JSON on the
   # last line of its own stdout.
   set +e
-  result="$(curl -N -sS --max-time 30 "$BASE/events/tick?n=5" 2>"$TMPDIR/sse_curl_err" | python3 -c '
+  result="$(curl -N -sS --max-time 30 -H "x-id-token: $ID_TOKEN" "$BASE/events/tick?n=5" 2>"$TMPDIR/sse_curl_err" | python3 -c '
 import sys, time, json
 
 first = None

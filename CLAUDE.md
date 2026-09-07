@@ -31,7 +31,8 @@ survives, so anything the next session must know goes in those files before you 
   --stack-prefix CdkCore --repo tylerschloesser/cdk-core --dry-run` — it exits non-zero if it
   *would* delete anything, so a green dry run is a positive statement that the account is
   clean. `scripts/verify-preview.sh <n> --expect-absent` asserts one preview's absence from the
-  outside.
+  outside; without `--expect-absent` it proves one works, and its SSE check needs
+  `--id-token "$(scripts/preview-login.sh <n>)"` to stream rather than just assert the 401.
 - **`pnpm verify`, `pnpm dev` and `pnpm e2e` never touch AWS or need credentials.** That
   property is what lets a session verify its own work before opening a PR. Keep it. `verify`
   is lint + typecheck + unit tests + build; `e2e` is the browser suite and is deliberately

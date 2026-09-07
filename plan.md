@@ -1026,6 +1026,13 @@ streaming SSE endpoint, and clean teardown. No auth yet (backends run with `AUTH
   arm64, `externalModules: ['@aws-sdk/*']`), the events URL `RESPONSE_STREAM`.
 - `scripts/verify-preview.sh <n>`: curls `/`, `/api/ping`, `/api/echo` (POST with hash),
   `/events/tick?n=5` with `curl -N` and timestamps, and a nonexistent host expecting 404.
+  **[revised, Epoch 5] The SSE check needs an ID token, and had been silently failing since
+  Epoch 4.** Making `/events/*` require auth turned the unauthenticated stream into a 401, and
+  nothing caught it: Epoch 4's own handoff only ran the script in `--expect-absent` mode, where
+  a failing request is the expected result. It now takes `--id-token` (or `CDK_CORE_ID_TOKEN`)
+  and, given no token, asserts the endpoint answers **401** — which is a better check than the
+  one it replaced, because it proves from the outside that the preview API enforces auth. The
+  script stays credential-free; minting the token is `scripts/preview-login.sh`'s job.
 - `.claude/rules/cdk.md` with the gotchas that bit (start from yahn's five).
 
 **Files.** `packages/cdk-core/src/{preview-site,preview-deployment,certificate,router,handlers}/**`,
