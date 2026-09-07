@@ -43,6 +43,11 @@ export function isLocalMode(): boolean {
 
 export interface VerifierConfig {
   readonly issuer: string
+  /**
+   * One app client id, or a comma-separated list of them — the same shape as
+   * the `AUTH_CLIENT_ID` the constructs emit. A preview passes two (browser
+   * and machine); prod passes one.
+   */
   readonly clientId: string
 }
 
@@ -72,10 +77,18 @@ function parseUserPoolId(issuer: string): string {
  */
 export function createVerifier(config: VerifierConfig): Verifier {
   const userPoolId = parseUserPoolId(config.issuer)
+  const clientIds = config.clientId
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0)
+  if (clientIds.length === 0) {
+    throw new Error('createVerifier: clientId is empty')
+  }
   const jwtVerifier = CognitoJwtVerifier.create({
     userPoolId,
     tokenUse: 'id',
-    clientId: config.clientId,
+    // An array is still an allowlist: `aud` must be one of these exact ids.
+    clientId: clientIds,
   })
   return {
     async verify(idToken) {

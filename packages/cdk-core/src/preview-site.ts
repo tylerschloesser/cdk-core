@@ -313,6 +313,11 @@ export class PreviewSite extends Construct {
     // needs it to build both the authorize and the token URL.
     this.parameter('authIssuer', pool.issuer)
     this.parameter('authClientId', pool.userPoolClient.userPoolClientId)
+    // Published separately from `authClientId` because the two are read for
+    // different things: the browser puts `authClientId` in its authorize URL,
+    // while the API must accept `aud` from *either* client (see
+    // `AuthEnvironment.AUTH_CLIENT_ID`).
+    this.parameter('authMachineClientId', machineUserPoolClient.userPoolClientId)
     this.parameter('authDomain', pool.authConfig.domain)
     this.parameter('machineSecretArn', machineUserSecret.secretArn)
 

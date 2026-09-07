@@ -91,7 +91,14 @@ export class PreviewDeployment extends Construct {
       const issuer = read('authIssuer')
       const clientId = read('authClientId')
       authConfig = { issuer, clientId, domain: read('authDomain') }
-      this.authEnvironment = { AUTH: 'cognito', AUTH_ISSUER: issuer, AUTH_CLIENT_ID: clientId }
+      this.authEnvironment = {
+        AUTH: 'cognito',
+        AUTH_ISSUER: issuer,
+        // Both clients, because the machine user's tokens carry the `machine`
+        // client as their `aud` and a human's carry `browser`. The pool is the
+        // isolation boundary, not the client.
+        AUTH_CLIENT_ID: `${clientId},${read('authMachineClientId')}`,
+      }
     } else {
       this.authEnvironment = {}
     }

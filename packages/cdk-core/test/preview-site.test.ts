@@ -113,7 +113,7 @@ describe('PreviewSite auth', () => {
     )
   })
 
-  it('publishes the four auth parameters a PR stack and the e2e fixture read', () => {
+  it('publishes the five auth parameters a PR stack and the e2e fixture read', () => {
     const { template } = build(true)
     const names = (
       Object.values(template.findResources('AWS::SSM::Parameter')) as {
@@ -127,6 +127,10 @@ describe('PreviewSite auth', () => {
         // Not derivable from the issuer, and the browser needs it for both the
         // authorize redirect and the token exchange.
         `/cdk-core/${DOMAIN}/preview/authDomain`,
+        // Separate from `authClientId`: the browser authorizes with one client
+        // and the machine user signs in through the other, so the API has to
+        // accept `aud` from either.
+        `/cdk-core/${DOMAIN}/preview/authMachineClientId`,
         `/cdk-core/${DOMAIN}/preview/machineSecretArn`,
       ]),
     )

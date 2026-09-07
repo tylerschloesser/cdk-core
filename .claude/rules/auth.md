@@ -86,6 +86,12 @@ carry only `aws.cognito.signin.user.admin`, so scopes say nothing. The verifier 
 `(issuer, clientId)` for the life of the process — `aws-jwt-verify` caches the JWKS inside the
 instance, and a fresh one per request re-fetches it from Cognito every time.
 
+**`AUTH_CLIENT_ID` is a comma-separated list, and a preview passes two.** A token's `aud` is
+the app client that minted it, not the pool, so the machine user's tokens carry `machine` and a
+human's carry `browser`. A preview API that trusted only `authClientId` would 401 every machine
+call — measured, not inferred. Trusting both is safe because the boundary that matters is the
+*pool*: the prod verifier's `iss` is a different pool, so it rejects both.
+
 The negative test is the one that proves anything: a **preview** ID token sent to
 `https://cdk-core.ty.ler.dev/api/me` must be **401**, because the prod verifier's `iss` is the
 prod pool. That, not the 200, is what makes the two pools isolated rather than merely separate.
