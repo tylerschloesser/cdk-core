@@ -8,9 +8,9 @@
 > `cdk-core sweep` behind it. **Auth is real** — Google login on production and on previews
 > through the bounce, Claude signing into a preview with no browser, and no password path in
 > prod. **The package is published**: `@tylerschloesser/cdk-core@0.1.0` is on public npm, and
-> `0.1.1` is tagged and was accepted by npm through CI but is **not on the registry yet** — see
-> revision 40. The marketplace now ships **two** plugins: `cdk-core` (three skills) and `epochs`
-> (the session mechanism itself).
+> **`0.1.1` was published from CI by trusted publishing** — no token, no passkey prompt, with a
+> SLSA provenance attestation. The marketplace now ships **two** plugins: `cdk-core` (three
+> skills) and `epochs` (the session mechanism itself).
 >
 > **Epoch 6 was the hardening pass, and it was mostly measurement.** Almost nothing about the
 > system changed; what changed is that the claims are now numbers. The sweeper deleted real
@@ -227,24 +227,31 @@
 >    sweeper: the same run as `node packages/cdk-core/dist/bin/sweep.js` is clean. Nobody had
 >    seen it because every previous live run printed `(nothing to reconcile)` and exited 0.
 >
-> 40. **[Epoch 6] A green publish run does not mean the version is on npm.** `v0.1.1` ran
->    `publish.yml` to success — OIDC exchange 200, tag guard passed, `consumer-smoke.sh --pack`
->    passed, and pnpm printed `✅ Published package @tylerschloesser/cdk-core@0.1.1` — while
->    `registry.npmjs.org/@tylerschloesser/cdk-core/0.1.1` is **404** and `latest` is still
->    0.1.0. The likely cause is npm **staged publishing**: a trusted publisher configured
->    stage-only holds the version hidden until a maintainer approves it, and `npm stage approve`
->    requires proof of presence, so **no workflow can ever complete a stage-only publish**.
->    Verify the tarball actually landed before believing a publish, and note the version number
->    is spent regardless — a retry goes to 0.1.2.
-> **Human actions owed — one:** `npm stage list @tylerschloesser/cdk-core`, and if 0.1.1 is
-> queued, `npm stage approve @tylerschloesser/cdk-core@0.1.1`. It needs a real TTY and a 2FA
-> prompt by design. If 0.1.1 is *not* queued, the publish path is not trustworthy yet and the
-> `✅ Published` line needs chasing. The trusted publisher is configured (organization
-> `tylerschloesser`, repo `cdk-core`, workflow `publish.yml`); if its allowed action is
-> stage-only and that was not intended, switching it to plain `npm publish` makes the next tag
-> go straight out. Epoch 5's actions are done: the npm **organization** `tylerschloesser` exists
-> (the npm username is `tyle`), and 0.1.0 is published. The user's npm 2FA is a **passkey**,
-> which is the whole reason trusted publishing was worth building.
+> 40. **[Epoch 6] The npm registry lags a successful publish by minutes, and the gap is
+>    indistinguishable from a failed one.** `publish.yml` printed `✅ Published
+>    @tylerschloesser/cdk-core@0.1.1` at 03:56:45; the registry's own `time` entry says
+>    03:59:22, and the raw packument still 404'd for several minutes after that — checked
+>    against `registry.npmjs.org` directly, so not the npm CLI's cache. A 404 taken minutes
+>    after a green run is not evidence the publish failed. (npm **staged publishing** would
+>    produce a permanent version of this symptom — a stage-only trusted publisher holds a
+>    version hidden until `npm stage approve`, which needs proof of presence and so can never
+>    be completed by a workflow — but that is not what happened here.)
+> 41. **[Epoch 6] `--provenance` works through `pnpm publish`** even though `pnpm publish --help`
+>    does not list it: 0.1.1's packument carries an attestation with `predicateType:
+>    https://slsa.dev/provenance/v1`. The published manifest also carries
+>    `{"aws-jwt-verify":"^5.2.1"}`, confirming the `catalog:` specifier resolved through CI.
+> 42. **[Epoch 6] `npm install -g npm@latest` now means npm 12**, whose engine range is
+>    `^22.22.2 || ^24.15.0 || >=26.0.0`. It works on `setup-node`'s current 22.x and would break
+>    under a pinned older node. `npm stage` also exists only from npm 12, so a local npm 11
+>    answers `Unknown command: "stage"`.
+>
+> **Human actions owed: none.** The npmjs.com trusted publisher is configured (organization
+> `tylerschloesser`, repository `cdk-core`, workflow filename **`publish.yml`** — npm matches on
+> the filename, so renaming that workflow breaks publishing silently) and has published a real
+> version through it. Epoch 5's actions are done too: the npm **organization** `tylerschloesser`
+> exists (the npm username is `tyle`), and 0.1.0 is published. The user's npm 2FA is a
+> **passkey**, which is the whole reason trusted publishing was worth building — and it is now
+> out of the release path entirely.
 >
 > **One thing for the user to confirm (outstanding since Epoch 1):** the repo is public per
 > Epoch 1's plan text, and `plan.md`, `progress.md`, `README.md`, `CLAUDE.md`, `.claude/rules/`,

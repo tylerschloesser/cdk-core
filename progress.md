@@ -1317,25 +1317,760 @@ The stacks' *own* keys and prefixes are removed by their stack deletes, which is
   it shipped this epoch but went in *after* the race, so it has never run against a real
   conflict. The next epoch that deploys two PR stacks at once should grep the two
   `DeploymentPreviewResourcesHandler` log groups for `applyKvsRoute:`.
-- **Trusted publishing works up to the registry, and 0.1.1 is NOT live.** The `v0.1.1` tag ran
-  `publish.yml` to a green finish: the OIDC exchange returned 200 for
-  `audience=npm:registry.npmjs.org`, the tag guard passed, `consumer-smoke.sh --pack` passed in
-  CI, and pnpm printed `✅ Published package @tylerschloesser/cdk-core@0.1.1`. The registry
-  disagrees — `https://registry.npmjs.org/@tylerschloesser/cdk-core/0.1.1` is **404** and
-  `dist-tags.latest` is still `0.1.0`, checked against the raw packument, not the npm CLI's
-  cache. The likely cause is npm **staged publishing**: a trusted publisher can be configured
-  stage-only, in which case the version is accepted and held hidden until a maintainer approves
-  it. Approval is deliberately impossible over OIDC — `npm stage approve` requires proof of
-  presence — so no workflow can finish this. Check with `npm stage list
-  @tylerschloesser/cdk-core`; if 0.1.1 is queued, `npm stage approve
-  @tylerschloesser/cdk-core@0.1.1` promotes it. If it is *not* queued, then pnpm's success
-  message is wrong about something else and the publish path is not yet trustworthy.
-  **`v0.1.1` is tagged and `package.json` says 0.1.1, so the version number is spent either
-  way** — a re-publish attempt has to go to 0.1.2. Note `npm stage` exists only from **npm 12**;
-  a local npm 11 answers `Unknown command: "stage"`, so use `npx -y npm@latest stage list
-  <pkg>`. `npm install -g npm@latest` in `publish.yml` therefore installs npm 12, whose engine
-  range is `^22.22.2 || ^24.15.0 || >=26.0.0` — fine on `setup-node`'s current 22.x, but that
-  step would break under a pinned older node.
+- **Trusted publishing is proven end to end, and 0.1.1 is live** —
+  `@tylerschloesser/cdk-core@0.1.1`, published by CI with no token and no passkey prompt. The
+  OIDC exchange returned 200 for `audience=npm:registry.npmjs.org`, the tag guard passed,
+  `consumer-smoke.sh --pack` passed in CI, and the published manifest carries
+  `{"aws-jwt-verify":"^5.2.1"}` — the `catalog:` specifier resolved, which is the thing
+  `pnpm publish` exists to guarantee. **`--provenance` works through pnpm**: the packument
+  carries an attestation with `predicateType: https://slsa.dev/provenance/v1`, which was an
+  open question when the flag turned out to be undocumented in `pnpm publish --help`.
+  **The registry lags the publish by minutes, and the gap looks exactly like a failed
+  publish.** pnpm printed `✅ Published` at 03:56:45; the registry's own `time` entry for
+  0.1.1 says 03:59:22, and the raw packument still 404'd for that version several minutes
+  after *that* — checked against `registry.npmjs.org` directly, not the npm CLI's cache. Do
+  not conclude a publish failed from a 404 taken minutes after a green run. `npm stage` also
+  needs **npm 12**; a local npm 11 answers `Unknown command: "stage"`.
+
+- **Teardown leaves 55 orphaned CloudWatch log groups.** `/aws/lambda/CdkCore-pr-*` survives
+  its stack because Lambda, not CloudFormation, creates the group; all 55 have
+  `retentionInDays: null` (never expire). `describe-log-groups` reports `storedBytes: 0` for
+  every one, and that field lags, so read it as "negligible", not "proven zero". It does not
+  break A2 in any way that costs money today, but it is unbounded in time and the sweeper
+  does not know about log groups. Fixing it means giving the Lambdas an explicit `logGroup`
+  with `RemovalPolicy.DESTROY` — which will fail to deploy over an existing group, so the
+  orphans must be deleted first. Left for a decision rather than done late in an epoch.
+- **The `new-site` checklist has still never been walked on a real second repo.** Skipped by
+  the user's explicit decision this session: it needs a new repo, a second domain and a full
+  set of AWS resources, and is most of a session on its own. A3's human-actions half stays
+  unmeasured.
+- Unchanged from Epoch 5: the refresh path has never refreshed a real Cognito token;
+  `logout()` is local-only; `CachePolicies.originDecides` is unused by the reference site;
+  the Google consent screen is still in **Testing**.
+
+### AWS resources alive after this epoch
+
+The four permanent stacks — `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
+`CdkCoreGithubOidc` — plus the two Secrets Manager secrets and the $10 budget, all unchanged.
+
+**`CdkCore-pr-10` is alive and that is correct**: it is PR #10, this epoch's own branch,
+still open at the time of writing. `pr-teardown.yml` deletes it when the PR merges. The
+sweeper agrees:
+
+```
+$ AWS_PROFILE=admin pnpm --filter infra exec cdk-core sweep --site cdk-core.ty.ler.dev \
+    --stack-prefix CdkCore --repo tylerschloesser/cdk-core --dry-run
+stack   CdkCore-pr-10                      10  kept    PR is open
+key     pr-10.preview.cdk-core.ty.ler.dev  10  kept    stack still live
+prefix  pr-10/                             10  kept    stack still live
+```
+
+Every other stack this epoch created — `CdkCore-pr-3`, `-4`, `-9`, `-11` — is gone: the
+first three to the sweeper (the A8 proof above), the fourth to `pr-teardown.yml` after its
+branch was force-deleted.
+
+### What the next epoch needs to know
+
+- **A8 is met; the daily `cleanup.yml` is no longer an untested safety net.** The way to
+  re-prove it cheaply is the one used here: `cdk deploy CdkCore-pr-<n> --exclusively -c
+  pr=<n>` for an already-closed PR number, plus a hand-written key and `pr-<n>/` prefix for a
+  *different* closed PR, so the key and prefix paths are exercised independently of the
+  stack path. A stack delete removes its own key and prefix, so a single orphaned stack
+  proves only one of the three.
+- **`FunctionComputeUtilization` needs `Region=Global` alongside `FunctionName`.** Without
+  it `get-metric-statistics` returns an empty datapoint list and no error, which reads
+  exactly like "the function was never invoked".
+- **`pnpm --filter infra exec cdk-core sweep` prints a bare `undefined` after the table on a
+  non-zero exit.** It comes from pnpm's own error reporting, not the sweeper: the same
+  command as `node packages/cdk-core/dist/bin/sweep.js sweep …` is clean. Do not go looking
+  for it in `printTable`.
+- **Publishing 0.1.1 needs one human action first** (below), then a `v0.1.1` tag on `main`.
+  Dispatch `publish.yml` with `dry_run: true` first — it runs the tag guard, `pnpm verify`
+  and `consumer-smoke.sh --pack` without spending the version. `workflow_dispatch` only
+  appears once the workflow is on the default branch.
+- **The `epochs` plugin's skills will not appear until the session after this one**, per the
+  Epoch 5 finding. Do not debug the manifest; `claude plugin validate ./plugins/epochs`
+  passes.
+- **`.claude/rules/` is still seven files**; `workflows.md` grew a sixth workflow row and
+  three findings, `plugin.md` gained the second plugin.
+- The repo is still **public**, and the confirmation asked for after Epoch 1 is still
+  outstanding. This epoch added no new account detail to tracked files.
+
+**Human actions owed: none.** The npmjs.com trusted publisher is configured (organization
+`tylerschloesser`, repository `cdk-core`, workflow filename **`publish.yml`**) and has now
+published a real version through it. npm matches on the filename, so renaming that workflow
+breaks publishing with no error on this side.
+
+### The merge
+
+Epoch 3 landed on `main` in two PRs, both squashed: **PR #3** (`ebc7cb5`) with the constructs,
+the sweeper and the workflows, and **PR #5** (`e1e46c3`) with the two workflow fixes, the
+README and this handoff. Both got a preview and both were torn down on merge. `deploy.yml` ran
+on each merge and deployed production; the final run, `34066566331`, is green and
+`https://cdk-core.ty.ler.dev/api/ping` answers `{"message":"pong"}`.
+
+Final state of the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
+`CdkCoreGithubOidc`, and **no** `CdkCore-pr-*`. KVS `{"Items": []}`, preview bucket empty, no
+open PRs. `main` is the base for Epoch 4's branch.
+
+## Epoch 4 — Auth: Cognito + Google, the bounce, machine login, authenticated e2e — 2026-09-06 — DONE
+
+Google login works on production and on a preview, and Claude can sign into a preview with no
+browser and no Google account and then drive the UI as that user — including an authenticated
+SSE stream. The prod stack contains no password path, and that is now asserted from the
+outside rather than intended.
+
+Commits `d92b3e0..10313e2` on `epoch-4-auth` (PR #7), plus the handoff commit.
+
+### Shipped
+
+- **`packages/cdk-core/src/user-pool.ts`** (new) — `siteUserPool()`, the pool shape both site
+  constructs build: `selfSignUpEnabled: false`, `FeaturePlan.ESSENTIALS`, a password policy
+  with `requireSymbols: false`, `RemovalPolicy.DESTROY`, a Google IdP reading
+  `cdk-core/google-oauth` as two dynamic references, a hosted-UI prefix domain, and one
+  `browser` app client. Plus `defaultDomainPrefix()`.
+- **`Site.auth`** (`src/site.ts:100`) — the prod pool, `userPool`/`userPoolClient`,
+  `authEnvironment`, and `auth` in the deployed `__config.json`.
+- **`PreviewSite.auth`** (`src/preview-site.ts:196`, `createAuth`) — the preview pool, the
+  `machine` app client (`disableOAuth`, `authFlows: {userPassword: true}`), the
+  `<domain>/preview-machine-user` secret with a generated password, the `PoolUser` custom
+  resource, and four new SSM parameters: `authIssuer`, `authClientId`, `authDomain`,
+  `authMachineClientId`, `machineSecretArn` (five, see deviation 3).
+- **`applyPoolUser`** (`src/handlers/preview-resources.ts`) — `AdminCreateUser` (SUPPRESS) →
+  `readPassword` → `AdminSetUserPassword --permanent`, idempotent on
+  `UsernameExistsException`, delete-tolerant of `UserNotFound`/`ResourceNotFound`. Written
+  against a `PoolUserDirectory` interface, 8 unit tests against a fake.
+- **`src/handler-asset.ts`** (new) — one place that resolves the bundled handler, shared by
+  `PreviewSite` and `PreviewDeployment`.
+- **`auth/oidc.ts`** (new) + **`auth/browser.ts`** — PKCE S256, the D5 bounce `redirect_uri`
+  and `<nonce>.<pr>` state, `exchangeCode`/`refreshTokens`, a 5-minute refresh window with a
+  shared in-flight promise, `handleCallback` returning the return path. 22 unit tests
+  including the RFC 7636 Appendix B vector.
+- **`auth/server.ts`** — `createVerifier` on `aws-jwt-verify` (`tokenUse: 'id'`, the user pool
+  id parsed out of the issuer), cached per `(issuer, clientId)`, a comma-separated client
+  allowlist, and a `getUser` `cognito` branch that throws on missing env and returns `null` on
+  an invalid token. 17 unit tests.
+- **`apps/api/src/events.ts`** — `/events/tick` requires auth. **`apps/web/src/App.tsx`** — a
+  `sign in with Google` button in non-local mode, and the callback returns to `returnTo`.
+- **`e2e/fixtures.ts`** (new), `auth.spec.ts`, `sse.spec.ts` — `machineAuth`/`authedPage` and
+  the exported `TARGET`. **`scripts/preview-login.sh`** (new).
+- **`GithubDeployRole`** — `secretsmanager:GetSecretValue` on
+  `secret:<domain>/preview-machine-user-*` and nothing else new.
+- **`.claude/rules/auth.md`** (new); `cdk.md`, `workflows.md`, `testing.md` corrected.
+
+### Acceptance test
+
+```
+$ gh run list --branch epoch-4-auth --limit 2
+CI: success @ 10313e2
+PR Preview: success @ 10313e2          # 8 passed, 2 skipped — includes the auth spec,
+                                       # the prod-isolation negative test and authed SSE
+
+$ ./scripts/preview-login.sh 7 | xargs -I{} curl -fsS -H 'x-id-token: {}' https://pr-7.preview.cdk-core.ty.ler.dev/api/me
+xargs: command line cannot be assembled, too long        # the plan's form cannot work — see deviation 1
+
+$ curl -fsS -H "x-id-token: $(./scripts/preview-login.sh 7)" https://pr-7.preview.cdk-core.ty.ler.dev/api/me
+{"sub":"84e844c8-b021-70bb-da84-7ff387914192","email":"claude@cdk-core.ty.ler.dev"}
+
+$ curl -sS -o /dev/null -w '%{http_code}\n' -H "x-id-token: $(./scripts/preview-login.sh 7)" https://cdk-core.ty.ler.dev/api/me
+401
+
+$ aws cognito-idp describe-user-pool-client --user-pool-id us-east-1_havW5h4hk \
+    --client-id 7mrijhcfmdutdqbk5709dkf22l --query 'UserPoolClient.ExplicitAuthFlows'
+[
+    "ALLOW_REFRESH_TOKEN_AUTH"
+]
+
+$ aws cognito-idp list-users --user-pool-id us-east-1_havW5h4hk \
+    --query 'Users[?UserStatus!=`EXTERNAL_PROVIDER`]'
+[]
+```
+
+The manual half, done by the user: **Google login works on `https://cdk-core.ty.ler.dev` and
+on `https://pr-7.preview.cdk-core.ty.ler.dev`**, both landing back on the page signed in. The
+preview signed them in with no second consent screen — expected, and the visible upside of
+D4's one-Google-client-for-all-sites: the two *pools* are separate and their tokens live in
+separate origins' `localStorage`, but Google's session and consent grant are shared, so the
+second trip through `identity_provider=Google` is silent.
+
+Extra checks the plan did not ask for but which pin the parts a green suite would not
+distinguish:
+
+```
+bounce, valid PR      302 -> https://pr-7.preview.cdk-core.ty.ler.dev/auth/callback?code=abc123&state=Zm9vYmFy.7
+bounce, unknown PR    404      (state=….999999 — no KVS key)
+bounce, no state      404
+bounce, injected URL  404      (state=https://evil.example.com)
+anonymous /api/me, /events/tick, garbage token   401, 401, 401  (preview and prod)
+```
+
+**A6 is now met with auth.** Authenticated SSE through the preview distribution, 7 samples:
+1st→5th spread **median 2003 ms, range 2000–2003**; 1st→2nd **median 500 ms, range 499–501**,
+which is the producer's interval exactly — nothing buffers anywhere. Target was ≥ 400 ms.
+
+**A7 is met**, by the four lines above: refresh-only flows, zero native users, a preview token
+refused by production, and `/api/me` 401 for an anonymous caller.
+
+### Deviations from the plan
+
+1. **The acceptance test's `xargs -I{}` form cannot work, on macOS at least.** `xargs -I`
+   caps a replacement line at 255 bytes and a Cognito ID token is ~1050, so it fails with
+   `command line cannot be assembled, too long` before curl ever runs. `$(…)` is the form that
+   works and is what `.claude/rules/auth.md` and the plan now show.
+2. **CDK's `UserPoolClient` L2 cannot express "refresh only".** `configureAuthFlows` returns
+   `undefined` for an **empty** `authFlows` as well as an absent one, which omits
+   `ExplicitAuthFlows` from the template — and an omitted list makes Cognito apply its legacy
+   defaults, which include `ALLOW_USER_SRP_AUTH`. The plan's `authFlows: {}` **explicitly**
+   would therefore have produced the opposite of what it intended, silently. Pinned on the L1
+   (`cfnClient.explicitAuthFlows = ['ALLOW_REFRESH_TOKEN_AUTH']`) and asserted in
+   `site.test.ts`. (`authFlows: { userSrp: false }` also happens to work, by being non-empty;
+   it was rejected as too clever to survive a refactor.)
+3. **A preview API must trust *two* app clients, not one.** Measured, not inferred: the token
+   `scripts/preview-login.sh` mints carries the **machine** client as its `aud`, while
+   `authClientId` — what the browser authorizes with and what the Lambdas had — is the
+   **browser** client. A verifier given one 401s every call made with the other. `aud` is the
+   client that minted a token, not the pool, and the boundary that isolates prod from preview
+   is the pool (`iss`), so `AUTH_CLIENT_ID` became a comma-separated allowlist and
+   `PreviewSite` publishes `authMachineClientId` as a fifth parameter. The plan's D6 assumed
+   the machine token would simply be accepted.
+4. **`PreviewSite` publishes `authDomain` too.** The plan lists `authIssuer`, `authClientId`
+   and `machineSecretArn`. The hosted-UI host cannot be derived from the issuer, and the
+   browser needs it for both the authorize redirect and the token exchange.
+5. **`PreviewDeploymentProps` gained `auth?: boolean`.** A PR stack cannot detect whether the
+   site has a pool: `ssm.StringParameter.valueForStringParameter` on a parameter that does not
+   exist fails the *deploy*, not the synth, so there is nothing to branch on at build time.
+   The consumer already knows — it passed `auth` to `PreviewSite` in the same `bin/app.ts`.
+6. **The e2e suite has three targets, not two, and `.claude/rules/testing.md` is corrected.**
+   Production has no machine user and cannot have one — that *is* A7 — so `machineAuth` throws
+   there, the authenticated specs skip, and production asserts the 401 instead. The
+   consequence worth knowing: **`deploy.yml`'s post-deploy run can no longer exercise the
+   production SSE stream**, because `/events/tick` now requires auth. Epoch 3's unauthenticated
+   production measurement (2040 ms) stands; the authenticated one is now a preview measurement
+   plus a human clicking `stream` after a Google login.
+7. **A `test.skip` inside a test body is too late.** Playwright resolves a test's fixtures
+   before running the body, so the first production run failed three specs instead of skipping
+   them: `machineAuth` threw first. The skips are now at `test.describe` scope.
+8. **`vitest`'s 5 s default timeout is too small for the synth tests.** CI went red on two
+   tests whose assertions were all correct: `Template.fromStack` stages and zips every
+   `Code.fromAsset`, CDK's provider framework included, and on a two-core runner with a dozen
+   files in flight that exceeded 5 s. `testTimeout: 30_000` as a hang guard, and
+   `preview-site.test.ts` memoises its synth per `auth` value. The suite still takes ~3 s
+   locally.
+9. **`previewResourcesAssetPath()` special-cases being loaded from `src/`.** A vitest run
+   imports the constructs from source, where `dist/handlers/preview-resources` does not exist,
+   and `Code.fromAsset` throws `CannotFindAsset` before any assertion runs. It returns
+   `src/handlers` in that case — keyed on the *directory name*, not on "does the bundle
+   exist", so a real deploy from an unbuilt `dist/` still fails loudly.
+10. **`Site`/`PreviewSite` take an explicit `domainPrefix` in `infra/bin/app.ts`.** The
+    Construct API's default is the domain with dots → dashes (`cdk-core-ty-ler-dev`), but the
+    epoch's human-action text — and therefore the Google client's redirect URIs — says
+    `cdk-core` and `cdk-core-preview`. The value that has to match a human's console typing is
+    a literal in `bin/app.ts` with a comment saying why, not a derivation.
+11. **`CdkCoreSite` was deployed by hand before the PR merged**, exactly as in Epoch 3 and for
+    the same reason: the acceptance test needs a live prod pool to prove the negative against,
+    and a Cognito failure is better found on a 90-second local loop. `deploy.yml` re-deploys it
+    on merge.
+12. **`aws-jwt-verify` is a real `dependencies` entry**, not an optional peer like
+    `aws-cdk-lib`. It is zero-dependency and a Lambda importing `auth/server` from the
+    published tarball must get a working verifier with no extra install step.
+
+### Left undone / untested
+
+- **The refresh path has never refreshed a real Cognito token.** It is unit-tested against a
+  fake token endpoint and the window is 5 minutes against a 1-hour token, so no e2e run or
+  manual check has reached it. First real exercise is a browser tab left open for 55 minutes.
+- **`logout()` is local-only.** It clears `localStorage`; it does not call Cognito's `/logout`
+  endpoint, so the pool session (and Google's) survive. That is why the preview signed the user
+  in silently, and it is fine for this reference site — but a consumer who wants a real sign-out
+  needs the hosted-UI logout redirect, which is not implemented.
+- **Nothing has raced two PR deploys** (unchanged from Epoch 3).
+- **The sweeper has still never deleted anything** (A8, unchanged — Epoch 6 owes it).
+- **`CachePolicies.originDecides` is still unused** by the reference site.
+- The Google consent screen is still in **Testing**, with the user as the only test user.
+
+### AWS resources alive after this epoch
+
+`CdkCoreShared`, `CdkCorePreview` (now also the preview user pool `us-east-1_D9US7hu40`, the
+`browser` and `machine` clients, the `claude` user, the secret
+`cdk-core.ty.ler.dev/preview-machine-user`, and a second Lambda + provider for `PoolUser`),
+`CdkCoreSite` (now also the prod user pool `us-east-1_havW5h4hk` and its one client) and
+`CdkCoreGithubOidc`. Plus the account-level budget. Two user pools idle at $0; two secrets at
+$0.40/month each.
+
+To remove everything (the two secrets are *named*, so a plain stack delete leaves a 30-day
+tombstone that blocks recreating the name — force-delete them):
+
+```
+AWS_PROFILE=admin pnpm build
+AWS_PROFILE=admin pnpm --filter infra exec cdk destroy CdkCoreSite CdkCorePreview CdkCoreShared CdkCoreGithubOidc
+AWS_PROFILE=admin aws secretsmanager delete-secret --region us-east-1 \
+  --secret-id cdk-core.ty.ler.dev/preview-machine-user --force-delete-without-recovery
+AWS_PROFILE=admin aws secretsmanager delete-secret --region us-east-1 \
+  --secret-id cdk-core/google-oauth --force-delete-without-recovery
+gh variable delete AWS_DEPLOY_ROLE_ARN
+AWS_PROFILE=admin aws budgets delete-budget --account-id 063257577013 --region us-east-1 --budget-name account-monthly-10-usd
+```
+
+### What the next epoch needs to know
+
+- **The Cognito prefix domains are `cdk-core` and `cdk-core-preview`**, and they are literals
+  in `infra/bin/app.ts` because they must equal what was typed into the Google OAuth client's
+  redirect URIs. Changing either means editing the Google console in the same change, and the
+  failure mode is a `redirect_uri_mismatch` at Google with nothing in any AWS log. The
+  cheap pre-check, no browser needed: fetch the Cognito `/oauth2/authorize` URL, follow its
+  `Location`, and confirm Google answers with a sign-in page rather than `Error 400`.
+- **`AUTH_CLIENT_ID` is a comma-separated allowlist.** Anything that adds an app client to the
+  preview pool and wants the API to accept its tokens must add it there too.
+- **`deploy.yml`'s production e2e no longer covers the SSE stream** (deviation 6). If a future
+  epoch wants that back, the options are an unauthenticated health-stream route or a prod
+  machine user — and the second one deletes A7.
+- **Two secrets are named, not stack-owned, in the sense that matters**: deleting the stack
+  schedules them for deletion with a recovery window, and the name stays reserved until it
+  elapses. Recreating `CdkCorePreview` within 30 days of a destroy needs the force-delete
+  above first.
+- **`packages/cdk-core` now has a runtime `dependencies` block** (`aws-jwt-verify`). Epoch 5's
+  packaging work has to keep it there — an optional peer would ship a tarball whose
+  `auth/server` throws on import.
+- **The handler bundle grew from 1.1 MB to 1.4 MB** (Cognito + Secrets Manager clients). It is
+  uploaded on every PR deploy; repeat deploys still measured 33 s, so it has not cost anything
+  yet.
+- **`.claude/rules/cdk.md` is 132 lines**, over the ~120 `CLAUDE.md` asks for — it was already
+  130 before this epoch. Split it (origins/OAC is the natural seam) the next time it grows.
+- Epoch 5 still owes `npm login`, the plugin and the marketplace. Nothing else is owed by a
+  human for Epoch 5.
+- The repo is still **public**, and the account id, both zone ids, the preview
+  distribution/bucket/KVS ids, the deploy role ARN, GitHub's numeric ids and now **both user
+  pool ids and the two app client ids** are in tracked files. Pool and client ids are not
+  credentials — they appear in every authorize URL — but the confirm asked for after Epoch 1 is
+  still outstanding and this epoch added to it again.
+
+### The merge
+
+Epoch 4 landed on `main` as **PR #7** (`eee3393`), squashed. Both `CI` and `PR Preview` were
+green on the final commit (`88b5adf`), `pr-teardown.yml` deleted `CdkCore-pr-7` on close (run
+`34069548880`), and `deploy.yml` deployed production on the merge (run `34069548866`) — its
+post-deploy e2e run against `https://cdk-core.ty.ler.dev` is 5 passed, 5 skipped, the five
+skips being the machine-auth specs that production has no identity for by design.
+
+Final state of the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
+`CdkCoreGithubOidc`, and **no** `CdkCore-pr-*`. KVS `[]`, preview bucket empty,
+`cdk-core sweep --dry-run` printed `(nothing to reconcile)` and exited 0,
+`https://cdk-core.ty.ler.dev/api/ping` answers `{"message":"pong"}`, and
+`scripts/verify-preview.sh 7 --expect-absent` is 7 passed, 0 failed.
+
+One thing to know about that last check: run immediately after `pr-teardown.yml` completes it
+reported **5 passed, 2 failed**, and a re-run a minute later was 7/7. The stack delete removes
+the KVS key, but the edge has already-cached 200s for paths it served seconds earlier. Give it
+a minute before treating an `--expect-absent` failure as real.
+
+`main` is the base for Epoch 5's branch.
+
+---
+
+## Epoch 5 — Publish, the plugin, the skills, onboarding proof, Claude end-to-end — 2026-09-06 — DONE
+
+### Shipped
+
+Commits `e9cda67..23e7a79` on `main` (Epoch 5's branch merged as **PR #8**, then three
+follow-up commits straight to `main`). Tag **`v0.1.0`**.
+
+1. **`@tylerschloesser/cdk-core@0.1.0` is on public npm.** `packages/cdk-core/package.json`
+   gained `version`, `repository`, `homepage`, `bugs`, `keywords`, `author`, `engines` and
+   `publishConfig`; `packages/cdk-core/README.md` (167 lines) is the npm-facing page.
+   `files: ["dist"]` was already right — npm adds `README.md` on its own. Tarball 691 kB
+   packed / 4.0 MB unpacked, 53 files.
+2. **`defineSiteStacks()`** — `packages/cdk-core/src/define-site-stacks.ts`, exported from
+   `src/index.ts:34`. The four-stack layout in one call; see Deviations 1 for why it exists
+   and what it cost to prove.
+3. **The plugin.** `.claude-plugin/marketplace.json` (marketplace `tylerschloesser`),
+   `plugins/cdk-core/.claude-plugin/plugin.json`, skills `preview` (155 lines),
+   `preview-auth` (104), `new-site` (189), and `plugins/cdk-core/agents/{implementer,
+   verifier}.md`. This repo's `.claude/settings.json` enables it from its own checkout.
+4. **Templates.** `plugins/cdk-core/skills/new-site/templates/app.ts` (the CDK app),
+   `cdk.json`, `infra-package.json`, and the four workflow templates moved down into
+   `templates/workflows/`. `infra/bin/app.ts` is now *generated* from `app.ts`, and
+   `test/workflow-templates.test.ts` asserts the round-trip byte for byte.
+5. **`scripts/consumer-smoke.sh`** — a temp consumer project, an install from the registry or
+   a tarball, and a synth of all five stacks. No AWS credentials.
+6. **`scripts/count-consumer-cdk.sh`** — the A3 measurement, exits 1 when over target.
+7. **`packages/cdk-core/test/define-site-stacks.test.ts`** — 15 cases. Suite is now 168 tests.
+8. **`scripts/verify-preview.sh` gained `--id-token`**, fixing a check that had been failing
+   since Epoch 4 (Deviations 3).
+9. **`.claude/rules/cloudfront-origins.md`** — `cdk.md` had grown to 137 lines against
+   `CLAUDE.md`'s ~120, so its origins/OAC half split off at the seam Epoch 4's handoff named.
+
+### Acceptance test
+
+Run verbatim from `plan.md`'s Epoch 5 section, on `main` at `23e7a79`:
+
+```
+$ npm view @tylerschloesser/cdk-core version
+0.1.0
+$ scripts/consumer-smoke.sh                       # exit 0
+PASS: @tylerschloesser/cdk-core@0.1.0 synthesizes four stacks plus a PR stack outside this workspace
+$ scripts/consumer-smoke.sh --pack                # exit 0
+PASS: @tylerschloesser/cdk-core@0.1.0 synthesizes four stacks plus a PR stack outside this workspace
+$ claude plugin validate ./plugins/cdk-core
+✔ Validation passed
+$ claude plugin validate ./.claude-plugin/marketplace.json
+✔ Validation passed
+$ scripts/count-consumer-cdk.sh
+infra/bin/app.ts                         45
+total (non-blank, non-import, non-comment) 45
+(for reference: 89 non-blank lines, 60 line target)
+PASS: 45 <= 60
+```
+
+**A5, the end-to-end run.** A fresh `claude -p` session on `main` with the plugin loaded, given
+exactly `Change the ping response to `pong!` and verify it in a PR preview`, with no human step.
+It opened **PR #9**, which `gh pr view 9 --json state,comments` now reports `CLOSED`. The
+sticky comment while it was open read verbatim:
+
+```
+### PR Preview
+
+✅ deployed and e2e passed
+
+- URL: https://pr-9.preview.cdk-core.ty.ler.dev
+- Commit: d15ea9c6980be6b09a610ada38089bb2f8895449
+- deploy 97 s · push → comment 212 s
+```
+
+(The comment is sticky, so it now reads `🗑️ CdkCore-pr-9 is deleting.` — the green text above
+is the record.) `https://pr-9.preview.cdk-core.ty.ler.dev/api/ping` served `{"message":"pong!"}`
+while `https://cdk-core.ty.ler.dev/api/ping` went on serving `{"message":"pong"}`. The PR was
+closed without merging; production's ping is unchanged.
+
+The transcript summary, since nothing else survives: two commits, `Change ping response to
+pong!` and `verify-preview.sh: check for pong! not pong`, touching `apps/api/src/app.ts`,
+`e2e/api.spec.ts` and `scripts/verify-preview.sh` — all three places the string appears,
+including the `grep -q '"pong"'` in the shell script, which is the one a careless run misses
+because it fails only against a preview and passes against production. It ran `pnpm verify`,
+pushed, opened the PR, watched the run, ran `verify-preview.sh`, and reported. Its closing line
+was: *"Verified end to end: PR #9 deployed, the preview at `pr-9.preview.cdk-core.ty.ler.dev`
+returns `{"message":"pong!"}`, both the e2e suite and `verify-preview.sh` pass, and the sticky
+comment shows ✅."*
+
+**It took two attempts, and the first one is the finding** — see Deviations 5.
+
+### Deviations from the plan
+
+1. **A3 was missed by 3x, and `defineSiteStacks()` is the answer the plan prescribed.**
+   `scripts/count-consumer-cdk.sh` measured the hand-written `infra/bin/app.ts` at **178**
+   non-blank, non-import, non-comment lines against a target of 60. The epoch text says: "if it
+   is over, add a `defineSiteStacks()` convenience and re-count, but keep the constructs
+   primary." Done; the number is **45**. It is a *function, not a construct*, and it is the one
+   thing in the package that creates a `Stack` — which contradicted a flat claim in
+   `plan.md` → Architecture, now corrected there.
+
+   The refactor was proven a no-op the way Epoch 3's `behaviors.ts` extraction was:
+   `cdk synth --json` of `CdkCoreShared`, `CdkCorePreview` and `CdkCoreGithubOidc` is
+   **byte-identical** before and after (sha256 compared). `CdkCoreSite` differs in exactly one
+   resource, `AWS::CDK::Metadata`, whose deflated `Analytics` string decodes to the same
+   construct-type list with one `Resource` entry in a different position. `CdkCore-pr-99`
+   differs in exactly one resource, the KVS-route custom resource, in the `deployedAt`
+   timestamp — and two synths of *identical* source differ there too, so it is synth
+   nondeterminism, not the refactor. Production has since redeployed from it three times, green.
+
+2. **`npm pack` cannot pack this package, and it would have shipped a broken 0.1.0.**
+   The first run of `scripts/consumer-smoke.sh --pack` died at the consumer's install:
+
+   ```
+   npm error code EUNSUPPORTEDPROTOCOL
+   npm error Unsupported URL Type "catalog:": catalog:
+   ```
+
+   npm has no idea what pnpm's `catalog:` protocol means, so the tarball carried
+   `"aws-jwt-verify": "catalog:"` in `dependencies`. `pnpm pack`/`pnpm publish` rewrite catalog
+   and `workspace:` specifiers to real ranges (`{"aws-jwt-verify":"^5.2.1"}`, asserted by the
+   smoke script now). D7 and the Epoch 5 deliverable both said `npm publish`; both now say
+   `pnpm publish` and why. An npm version is permanent, so this is a bug you only get to find
+   once — finding it before the upload is the entire reason that script exists.
+
+3. **`scripts/verify-preview.sh`'s SSE check had been failing since Epoch 4.** Epoch 4 made
+   `/events/*` require a Cognito ID token; the script curls it unauthenticated, so it has been
+   getting 401 and reporting `only 0 "event: tick" frames arrived` ever since. Nothing caught
+   it because Epoch 4's handoff ran the script only in `--expect-absent` mode, where a request
+   that fails is the *expected* result — the one mode that would have shown the break was never
+   run after the change that broke it. It now takes `--id-token` (or `CDK_CORE_ID_TOKEN`) and,
+   given none, asserts the endpoint answers **401**, which is a better check than the one it
+   replaced: it proves from outside that the preview API enforces auth. Both modes measured
+   against PR 8: 7/0 without a token, 7/0 with one (spread 2002 ms, first gap 500 ms).
+
+4. **Epoch 4's explanation of the post-teardown failures is wrong, and the numbers are now
+   measured.** Its handoff attributes them to CloudFront serving already-cached 200s. The
+   residual answer is **403**, and it appears on `/api/*` too — which is `CACHING_DISABLED`, so
+   caching cannot be the cause. It is KVS propagation on the *delete* side: the key is gone
+   from the store immediately (`list-keys` → `[]`) but some edges still resolve it, rewrite to
+   a `/pr-<n>/` prefix whose objects are deleted, and get S3's `AccessDenied` — 403 not 404
+   because an OAC bucket policy grants `GetObject` and not `ListBucket`. Measured on
+   `CdkCore-pr-9`: **1 of 7** checks passing while the stack was still deleting, **3 of 7** the
+   moment `describe-stacks` stopped finding it, **7 of 7** under a minute after that. Risk 3 in
+   `plan.md` now carries the number.
+
+5. **A5 needed two attempts, and the first is a finding about the skill, not a failure to
+   hide.** The first fresh session made exactly the right change — including the
+   `e2e/api.spec.ts` assertion — committed it, and then stopped:
+
+   > Committed locally. Pushing the branch and opening a PR will kick off the preview-deploy
+   > pipeline against the AWS account — want me to go ahead with that?
+
+   In `-p` mode nobody answers, so the run ended. That is not a permission prompt and not a
+   wrong instinct in general: it is a model correctly treating "push, which deploys to AWS" as
+   outward-facing. But for this action it is wrong, and the `preview` skill was silent on it.
+   The skill now says opening the PR *is* the task — a preview is self-cleaning (teardown on
+   close, the sweeper behind it) and IAM-scoped to `<Prefix>-pr-*` — and, because "don't ask"
+   is only safe with its boundary written down, lists what still deserves a question: deleting
+   any stack, deploying production, publishing, force-pushing, the prod user pool. The second
+   run, with no other change, went straight through.
+
+6. **The npm scope did not exist, and that is a human action the plan did not list.**
+   `npm whoami` is **`tyle`**, so `@tylerschloesser` was not a scope on npm at all. Two
+   failures masked it in sequence: first `403 — Two-factor authentication or granular access
+   token with bypass 2fa enabled is required`, then, once a token was in place,
+   `404 Not Found - PUT … @tylerschloesser%2fcdk-core - Scope not found`. The user created a
+   free npm **organization** named `tylerschloesser`; renaming to `@tyle/cdk-core` was the
+   alternative and was rejected because the scope is baked into D7, the manifest, every
+   template, all four workflow templates, three skills, the README and two byte-equality tests.
+
+7. **The registry path of `consumer-smoke.sh` was broken in a way `--pack` could not show.**
+   It wrote the whole `name@range` string as the *value* of the manifest's dependency entry
+   (`"@tylerschloesser/cdk-core": "@tylerschloesser/cdk-core@latest"`). npm accepts that at
+   install time and then cannot resolve the module, surfacing three steps later as
+   `MODULE_NOT_FOUND`. `--pack` was unaffected because an absolute tarball path *is* a legal
+   version value. Fixed in `23e7a79`; both forms now pass.
+
+8. **The plugin's skills appear one session late**, in both the absolute-path and relative-`"."`
+   directory forms of `extraKnownMarketplaces`. The first session after the setting lands
+   registers the marketplace; the next one exposes its skills. Measured twice. Recorded in the
+   `new-site` skill, because a consumer hits it on day one.
+
+9. **The plugin's agent copies are not byte copies.** The plan says "copies of this repo's".
+   Two sentences were generalized: the repo-specific "read every rule file in `.claude/rules/`"
+   became conditional on the repo having them, and "no semicolons, single quotes" became "match
+   the surrounding style" — a consumer repo has its own conventions, and a plugin that asserts
+   this repo's is stating something false about theirs.
+
+10. **`.github/workflows/` gained no template for the workflow-template move**, but the
+    templates directory did gain non-`.yml` files. `workflow-templates.test.ts` pairs the two
+    directories by filename with a `.yml` filter, so `app.ts`, `cdk.json` and
+    `infra-package.json` sitting alongside `workflows/` are invisible to it. That is deliberate
+    and now stated in the test's header comment.
+
+11. **Two self-inflicted errors, both caught before they shipped.** (a) A chunk spec told an
+    implementer to restore a file with `git checkout -- infra/bin/app.ts` after a deliberate
+    break; `git checkout --` is *index*-relative, and at the moment the first agent ran it the
+    refactor was unstaged, so it reverted 133 lines of work. Restored by re-rendering
+    `infra/bin/app.ts` from its own template — which is a side benefit of the template being
+    byte-exact — and the fix is to commit before delegating anything that touches the same
+    file. (b) The `new-site` skill claimed `claude plugin marketplace list` cannot show a
+    marketplace registered through `extraKnownMarketplaces`. The verifier ran the command and
+    got it listed. The observation behind the claim was real but predated the registering
+    session; corrected in `cde5c4e`.
+
+### Left undone / untested
+
+- **The sweeper has still never deleted anything** (A8, unchanged since Epoch 3 — Epoch 6
+  owes it). Every live run this epoch again found either an open PR or nothing.
+- **KVS propagation on the *create* side is still unmeasured.** The delete side now has a
+  number (Deviations 4); the create side has never had to wait, so the 5-minute poll in
+  `pr-preview.yml` has never been exercised near its limit.
+- **The refresh path has never refreshed a real Cognito token** (unchanged from Epoch 4).
+- **`logout()` is still local-only** (unchanged from Epoch 4).
+- **Nothing has raced two PR deploys** (unchanged since Epoch 3).
+- **`CachePolicies.originDecides` is still unused** by the reference site.
+- **The published package has never been consumed by a *real* second repo** — only by
+  `consumer-smoke.sh`'s synthetic one. `new-site`'s checklist beyond the synth step (the
+  by-hand OIDC deploy, the Google redirect URIs, the repo variable) has been read for accuracy
+  but never walked end to end on a second site.
+- **`npm publish` from CI (trusted publishing)** is not set up; 0.1.0 went out from a laptop.
+- The Google consent screen is still in **Testing**, with the user as the only test user.
+
+### AWS resources alive after this epoch
+
+Unchanged from Epoch 4 — this epoch created **nothing new in AWS**. `CdkCoreShared`,
+`CdkCorePreview`, `CdkCoreSite`, `CdkCoreGithubOidc`, plus the two Secrets Manager secrets and
+the account-level budget. No `CdkCore-pr-*`.
+
+Proof, run at the end of the session:
+
+```
+$ AWS_PROFILE=admin pnpm --filter infra exec cdk-core sweep --site cdk-core.ty.ler.dev \
+    --stack-prefix CdkCore --repo tylerschloesser/cdk-core --dry-run
+(nothing to reconcile)                                    # exit 0
+$ scripts/verify-preview.sh 9 --expect-absent
+7 passed, 0 failed
+$ curl -fsS https://cdk-core.ty.ler.dev/api/ping
+{"message":"pong"}
+```
+
+Teardown commands are unchanged; see Epoch 4's entry. **The npm version is not
+tearable-down** — 0.1.0 is permanent past the 72-hour unpublish window, which closes
+2026-09-10.
+
+### What the next epoch needs to know
+
+- **Publish with `pnpm publish`, never `npm publish`**, and pack with `pnpm pack`. Everything
+  in this workspace is a `catalog:` specifier. `.claude/rules/typescript-config.md` has it.
+- **The scope is an npm org (`tylerschloesser`), not a personal scope.** The npm username is
+  `tyle`. Publishing needs a token that bypasses 2FA (a classic *Automation* token), or a real
+  TTY where npm's browser auth flow can run — the user's 2FA is a passkey, so `--otp` is not
+  available. 0.1.0 went out from the user's own terminal for that reason.
+- **`infra/bin/app.ts` is generated.** Editing it means editing
+  `plugins/cdk-core/skills/new-site/templates/app.ts` in the same commit, or
+  `workflow-templates.test.ts` goes red on a byte comparison. The substitution table lives in
+  that test.
+- **A preview's absence takes about a minute after the stack delete *completes*** to become
+  true at the edge, and `pr-teardown.yml` deliberately does not wait for the delete. Sequence
+  for a trustworthy `--expect-absent`: wait for `describe-stacks` to stop finding the stack,
+  wait another minute, then run it. A 403 while you wait is KVS propagation, not caching.
+- **`scripts/verify-preview.sh` needs `--id-token "$(scripts/preview-login.sh <n>)"`** to
+  actually stream the SSE check; without it the check asserts a 401.
+- **The plugin's skills arrive one session after `extraKnownMarketplaces` lands.** Do not debug
+  a manifest over this; start a second session.
+- **`.claude/rules/` is now seven files.** `cdk.md` (91) kept the stacks and the router;
+  `cloudfront-origins.md` (65) took OAC, the invoke permissions, the POST payload hash and the
+  distribution delete order; `plugin.md` (81) is new and covers the marketplace, the skills,
+  the generated `app.ts`, and — the part that is not obvious — that a skill has to say when
+  *not* to ask, which is what the first A5 run failed on.
+- **Epoch 6's list is unchanged and now has one more item**: race two PR deploys, cancel a
+  workflow mid-deploy, prove the sweeper's delete paths (A8), measure router
+  `ComputeUtilization`, consider trusted publishing — and decide whether
+  `.claude/skills/{epoch,handoff}` become a second plugin in this marketplace, which is now
+  cheaper than it was because the marketplace exists and is proven.
+- The repo is still **public**, and the confirm asked for after Epoch 1 is still outstanding.
+  This epoch added no new account detail to tracked files — the ids in
+  `plugins/cdk-core/skills/new-site/templates/app.ts` are `{{PLACEHOLDER}}` tokens, and the
+  ones in `scripts/consumer-smoke.sh` are dummies (`000000000000`, `smoke.example.com`).
+
+### The merge
+
+Epoch 5's branch merged as **PR #8** (`e9cda67`), squashed, with `CI` and `PR Preview` both
+green on the final commit and `pr-teardown.yml` green on the close. Three follow-up commits
+went straight to `main` — `61e857c`, `b03913c`, `23e7a79` — each with `deploy.yml` green on
+the push. `main` is the base for Epoch 6.
+
+**PR #9 is the A5 artifact and is closed unmerged on purpose.** It exists to prove the
+criterion, not to change production's ping response.
+
+## Epoch 6 — Hardening and measurements — 2026-09-06 — DONE
+
+### Shipped
+
+Commits `1a6a538..28a0f13` on `epoch-6-hardening`, opened as **PR #10**.
+
+- **A8 is met.** The sweeper deleted real resources for the first time. Nothing in
+  `packages/cdk-core/src/sweep/` changed to make that true — the code was right; it had
+  never been given anything to reclaim.
+- `packages/cdk-core/src/handlers/preview-resources.ts` — `applyKvsRoute` now logs every
+  retry (key, operation, attempt, error name and message, backoff) and every success that
+  needed more than one attempt. `ApplyKvsRouteOptions.log` defaults to `console.warn`; three
+  tests in `packages/cdk-core/test/preview-resources.test.ts` cover it. Retry policy,
+  backoff and error classification are byte-for-byte unchanged.
+- `.github/workflows/publish.yml` + its template — npm **trusted publishing** (OIDC) on a
+  `v*` tag, plus `workflow_dispatch` with `dry_run` (default true). `publish` is now in
+  `WORKFLOW_NAMES` in `packages/cdk-core/test/workflow-templates.test.ts`.
+- `plugins/epochs/` — a second plugin in the marketplace, shipping generalized copies of
+  `epoch` and `handoff`. Registered in `.claude-plugin/marketplace.json`, enabled in
+  `.claude/settings.json`.
+- `packages/cdk-core/package.json` — **0.1.1**, the version `publish.yml` will publish.
+
+### Acceptance test
+
+Epoch 6's section states no single command; A8 is its acceptance criterion. Three stacks
+were deployed for closed PRs, and an orphan KVS key plus an orphan `pr-6/` S3 prefix were
+created by hand with no stack behind them. One `cdk-core sweep` (no `--dry-run`), exit 0:
+
+```
+KIND    ID                                PR  ACTION   REASON
+stack   CdkCore-pr-3                      3   deleted  PR is MERGED
+stack   CdkCore-pr-4                      4   deleted  PR is CLOSED
+stack   CdkCore-pr-9                      9   deleted  PR is CLOSED
+key     pr-6.preview.cdk-core.ty.ler.dev  6   deleted  PR is MERGED, stack gone
+prefix  pr-6/                             6   deleted  PR is MERGED, stack gone
+```
+
+Afterwards:
+
+```
+$ aws cloudfront-keyvaluestore list-keys ...        -> {"Items": []}
+$ aws s3 ls s3://cdkcorepreview-previewassets.../   -> (empty)
+$ cdk-core sweep ... --dry-run                      -> (nothing to reconcile)   # exit 0
+$ scripts/verify-preview.sh 9 --expect-absent       -> 7 passed, 0 failed
+$ curl -fsS https://cdk-core.ty.ler.dev/api/ping    -> {"message":"pong"}
+```
+
+The stacks' *own* keys and prefixes are removed by their stack deletes, which is why only
+`pr-6`'s appear as sweeper deletions. That is the case that had never run.
+
+### Deviations from the plan
+
+1. **KVS create-side propagation is ~29 s for a new hostname, not "a few seconds".** Seven
+   samples, a fresh hostname each time, put→first 200 at one PoP: median **29.0 s**, range
+   **14.3–29.4 s**. A hostname the edge has already seen re-propagates in ~1.4 s (6 samples,
+   median 1.42 s), so the cost is in the *novelty of the key*, not the write. Through a real
+   stack deploy (`CdkCore-pr-3`, whose hostname had existed in an earlier epoch) it was
+   ~10 s from `DeploymentKvsRoute` CREATE_COMPLETE to the first 200. `pr-preview.yml`'s
+   5-minute poll therefore has roughly **10x** headroom, not the ~100x a single fast sample
+   suggests. All single-PoP; global propagation is necessarily slower.
+2. **KVS delete-side propagation is ~46 ms at one PoP** (7 samples, median 46 ms, range
+   42–47, every sample ending in a genuine 404). This does **not** contradict revision 25's
+   ~1 minute: that number was the *last* edge to catch up during a teardown, this one is the
+   nearest edge. Both are true and they measure different things.
+3. **The router costs no measurable latency.** 40 interleaved pairs against
+   `pr-3.preview.cdk-core.ty.ler.dev` and production, order randomized within each pair,
+   after 5 warm-up requests to each: preview median **206.9 ms**, prod median **210.4 ms**,
+   per-pair delta median **-5.2 ms** (mean -3.3, range -142.5 to +130.0), preview faster in
+   26 of 40. The KVS read plus `updateRequestOrigin()` is below the noise floor. Caveat: the
+   two paths end at different Lambdas, so this bounds the router's cost rather than
+   isolating it.
+4. **Router `ComputeUtilization` p99 is 26.4–30.0%**, max 30, average 21.5–28.3, over four
+   1-minute buckets under ~800 requests. Dimensions are `FunctionName` **and
+   `Region=Global`** — a query with `FunctionName` alone returns no datapoints, silently.
+5. **Cancelling a workflow mid-deploy leaves a *working* preview, measured.** The run was
+   cancelled at 02:54:31 with `CdkCore-pr-10` in `CREATE_IN_PROGRESS`; GitHub reported it
+   cancelled by 02:54:54; CloudFormation reached **CREATE_COMPLETE at 02:55:58**, 87 s after
+   the runner died, and the preview answered 200 at 02:56:38. The next sweep kept all three
+   of its resources ("PR is open") and exited 0. The plan predicted this; nobody had watched
+   it happen.
+6. **A force-deleted branch tears down correctly.** Branch deleted 02:59:44 → GitHub closed
+   PR #11 → `pr-teardown.yml` fired at 02:59:48 (4 s) and the stack was gone by 03:02:12.
+   The workflow ran even though its branch no longer existed, which is the payoff of it
+   having no checkout step.
+7. **Two racing deploys both landed, but the race left no evidence.** `CdkCore-pr-4` and
+   `CdkCore-pr-9` deployed concurrently (96 s / 97 s, identical start); both keys landed;
+   the two custom-resource invocations overlapped by ~1.1 s. CloudWatch showed only the
+   runtime's own INIT/START/END lines, so there was no way to tell a survived conflict from
+   a lucky serialization. That is why `applyKvsRoute` now logs. **The retry path itself is
+   still unobserved** — see below.
+8. **`--provenance` is undocumented in `pnpm publish --help` but accepted.** A local
+   `pnpm publish --provenance --no-git-checks --dry-run` runs clean. Whether an attestation
+   is actually produced is unknown until the first real CI publish.
+9. **The `id-token: write` filter no longer means "touches AWS".** `publish.yml` requests it
+   for npm. `workflow-templates.test.ts`'s comment and `.claude/rules/workflows.md` both said
+   otherwise and were corrected in the same commit.
+
+### Left undone / untested
+
+- **The KVS retry path has still never been observed retrying.** The logging that would show
+  it shipped this epoch but went in *after* the race, so it has never run against a real
+  conflict. The next epoch that deploys two PR stacks at once should grep the two
+  `DeploymentPreviewResourcesHandler` log groups for `applyKvsRoute:`.
+- **Trusted publishing is proven end to end, and 0.1.1 is live** —
+  `@tylerschloesser/cdk-core@0.1.1`, published by CI with no token and no passkey prompt. The
+  OIDC exchange returned 200 for `audience=npm:registry.npmjs.org`, the tag guard passed,
+  `consumer-smoke.sh --pack` passed in CI, and the published manifest carries
+  `{"aws-jwt-verify":"^5.2.1"}` — the `catalog:` specifier resolved, which is the thing
+  `pnpm publish` exists to guarantee. **`--provenance` works through pnpm**: the packument
+  carries an attestation with `predicateType: https://slsa.dev/provenance/v1`, which was an
+  open question when the flag turned out to be undocumented in `pnpm publish --help`.
+  **The registry lags the publish by minutes, and the gap looks exactly like a failed
+  publish.** pnpm printed `✅ Published` at 03:56:45; the registry's own `time` entry for
+  0.1.1 says 03:59:22, and the raw packument still 404'd for that version several minutes
+  after *that* — checked against `registry.npmjs.org` directly, not the npm CLI's cache. Do
+  not conclude a publish failed from a 404 taken minutes after a green run. `npm stage` also
+  needs **npm 12**; a local npm 11 answers `Unknown command: "stage"`.
+
 - **Teardown leaves 55 orphaned CloudWatch log groups.** `/aws/lambda/CdkCore-pr-*` survives
   its stack because Lambda, not CloudFormation, creates the group; all 55 have
   `retentionInDays: null` (never expire). `describe-log-groups` reports `storedBytes: 0` for
@@ -1415,8 +2150,8 @@ Epoch 6 merged as **PR #10** (`cafb93d`), squashed, with `CI` and `PR Preview` g
 final commit. `deploy.yml` was green on the merge and production answers `{"message":"pong"}`;
 `pr-teardown.yml` removed `CdkCore-pr-10`, so **no PR stack is alive**. `publish.yml` was then
 dispatched with `dry_run: true` (green: verify and pack ran, publish skipped as designed) and
-the `v0.1.1` tag was pushed, whose run is green but has not put 0.1.1 on the registry — see
-*Left undone*.
+the `v0.1.1` tag was pushed, publishing **`@tylerschloesser/cdk-core@0.1.1`** from CI with a
+provenance attestation.
 
 **PR #11 is a throwaway** and is closed, unmerged, with its branch deleted — deleting the
 branch *was* the test.

@@ -51,29 +51,32 @@ the sweep exits non-zero. That is pnpm's error reporting, not the sweeper; `node
 packages/cdk-core/dist/bin/sweep.js sweep ...` is clean. Nobody saw it for three epochs because
 every live run printed `(nothing to reconcile)` and exited 0.
 
-## A green publish run is not a published version
+## The registry lags a green publish
 
-`v0.1.1` ran `publish.yml` to success — OIDC exchange 200, tag guard passed,
-`consumer-smoke.sh --pack` passed, `✅ Published package @tylerschloesser/cdk-core@0.1.1` — and
-the registry 404s for that version. npm **staged publishing** is the likely reason: a trusted
-publisher can be configured stage-only, which accepts the version and holds it hidden until a
-maintainer runs `npm stage approve`. That approval requires proof of presence, so **no workflow
-can ever complete a stage-only publish**, and no amount of CI green will tell you.
-
-Always confirm the tarball landed before believing a publish:
+`v0.1.1` published through `publish.yml` with provenance, and for several minutes afterwards
+`registry.npmjs.org/@tylerschloesser/cdk-core/0.1.1` still answered **404** — pnpm's
+`✅ Published` line at 03:56:45 against the registry's own recorded publish time of 03:59:22,
+and readable later still. Checked against the raw packument, not the npm CLI, and it 404s
+either way. **Do not conclude a publish failed from a 404 taken minutes after a green run**;
+confirm before retrying, because the version number is spent regardless and a retry has to bump.
 
 ```
 curl -fsS https://registry.npmjs.org/<pkg>/<version> > /dev/null && echo live
 ```
 
-The version number is spent either way — a retry has to bump.
+There is a permanent version of this symptom worth knowing: npm **staged publishing**. A
+trusted publisher can be configured stage-only, which accepts a version and holds it hidden
+until a maintainer runs `npm stage approve` — proof of presence required, so **no workflow can
+ever complete a stage-only publish**. This repo's publisher is not stage-only.
 
 Two things about the npm the workflow installs. `npm install -g npm@latest` now resolves to
 **npm 12**, whose engine range is `^22.22.2 || ^24.15.0 || >=26.0.0` — it works because
 `setup-node`'s `node-version: 22` gives a recent 22.x, but pinning an older node would break
-that step. And `npm stage` only exists from npm 12, so approving a staged release locally needs
-`npx -y npm@latest stage list <pkg>` unless the local npm is current; `npm stage approve` takes
-the **stage id** from that listing, not a package spec.
+that step, and that step is what makes OIDC publishing work at all. And `npm stage` only exists
+from npm 12, so a local npm 11 answers `Unknown command: "stage"`; use `npx -y npm@latest`.
+
+**`--provenance` is undocumented in `pnpm publish --help` but works** — 0.1.1 carries a SLSA
+provenance attestation.
 
 ## The things that bit
 
