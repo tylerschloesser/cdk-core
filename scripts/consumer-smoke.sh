@@ -43,6 +43,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATES="$REPO_ROOT/plugins/cdk-core/skills/new-site/templates"
 PACKAGE_NAME="@tylerschloesser/cdk-core"
 
+# `SPEC` is the *value* of the manifest's dependency entry, so it is a version
+# range, a dist-tag, or an absolute tarball path -- never `name@range`. npm
+# accepts `"pkg": "pkg@latest"` at install time and then cannot resolve the
+# module, which is a confusing three-lines-later failure rather than an install
+# error.
+#
 # Dummy everything. The account is a valid-shaped 12-digit id that is not a
 # real account; the region must be us-east-1 because CloudFront requires its
 # certificate there and `siteCertificate` says so at synth.
@@ -74,7 +80,7 @@ while [ $# -gt 0 ]; do
     --version)
       shift
       [ $# -gt 0 ] || usage
-      SPEC="${PACKAGE_NAME}@$1"
+      SPEC="$1"
       shift
       ;;
     --tarball)
@@ -142,11 +148,11 @@ if [ -n "$TARBALL" ]; then
   esac
   SPEC="$TARBALL"
 elif [ -z "$SPEC" ]; then
-  SPEC="${PACKAGE_NAME}@latest"
+  SPEC="latest"
 fi
 
 echo "==> consumer project: $WORK" >&2
-echo "==> installing: $SPEC" >&2
+echo "==> installing: $PACKAGE_NAME@$SPEC" >&2
 
 # ---- lay the project out the way the template expects -------------------
 #
