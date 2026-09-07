@@ -48,6 +48,11 @@ survives, so anything the next session must know goes in those files before you 
 - Dependency versions live in the `catalog:` block of `pnpm-workspace.yaml`; manifests say
   `"catalog:"`. `erasableSyntaxOnly` + `verbatimModuleSyntax`: no `enum`, no constructor
   parameter properties, `import type`. No formatter; no semicolons; single quotes.
+- **`pnpm publish` and `pnpm pack`, never the `npm` forms** — npm cannot resolve a `catalog:`
+  specifier and ships it verbatim into the tarball. `scripts/consumer-smoke.sh --pack` is the
+  check, and it must pass before any publish: a published version is permanent.
+- **`infra/bin/app.ts` is generated** from `plugins/cdk-core/skills/new-site/templates/app.ts`.
+  Edit both in the same commit or `test/workflow-templates.test.ts` fails on a byte compare.
 - **Prod has no password path and that is load-bearing** (A7): the prod pool has no native
   users and its app client's `ExplicitAuthFlows` is `['ALLOW_REFRESH_TOKEN_AUTH']`, pinned on
   the L1 because CDK's L2 cannot express it. Never add a native user or an auth flow to the

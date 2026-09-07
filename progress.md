@@ -925,3 +925,291 @@ the KVS key, but the edge has already-cached 200s for paths it served seconds ea
 a minute before treating an `--expect-absent` failure as real.
 
 `main` is the base for Epoch 5's branch.
+
+---
+
+## Epoch 5 — Publish, the plugin, the skills, onboarding proof, Claude end-to-end — 2026-09-06 — DONE
+
+### Shipped
+
+Commits `e9cda67..23e7a79` on `main` (Epoch 5's branch merged as **PR #8**, then three
+follow-up commits straight to `main`). Tag **`v0.1.0`**.
+
+1. **`@tylerschloesser/cdk-core@0.1.0` is on public npm.** `packages/cdk-core/package.json`
+   gained `version`, `repository`, `homepage`, `bugs`, `keywords`, `author`, `engines` and
+   `publishConfig`; `packages/cdk-core/README.md` (167 lines) is the npm-facing page.
+   `files: ["dist"]` was already right — npm adds `README.md` on its own. Tarball 691 kB
+   packed / 4.0 MB unpacked, 53 files.
+2. **`defineSiteStacks()`** — `packages/cdk-core/src/define-site-stacks.ts`, exported from
+   `src/index.ts:34`. The four-stack layout in one call; see Deviations 1 for why it exists
+   and what it cost to prove.
+3. **The plugin.** `.claude-plugin/marketplace.json` (marketplace `tylerschloesser`),
+   `plugins/cdk-core/.claude-plugin/plugin.json`, skills `preview` (155 lines),
+   `preview-auth` (104), `new-site` (189), and `plugins/cdk-core/agents/{implementer,
+   verifier}.md`. This repo's `.claude/settings.json` enables it from its own checkout.
+4. **Templates.** `plugins/cdk-core/skills/new-site/templates/app.ts` (the CDK app),
+   `cdk.json`, `infra-package.json`, and the four workflow templates moved down into
+   `templates/workflows/`. `infra/bin/app.ts` is now *generated* from `app.ts`, and
+   `test/workflow-templates.test.ts` asserts the round-trip byte for byte.
+5. **`scripts/consumer-smoke.sh`** — a temp consumer project, an install from the registry or
+   a tarball, and a synth of all five stacks. No AWS credentials.
+6. **`scripts/count-consumer-cdk.sh`** — the A3 measurement, exits 1 when over target.
+7. **`packages/cdk-core/test/define-site-stacks.test.ts`** — 15 cases. Suite is now 168 tests.
+8. **`scripts/verify-preview.sh` gained `--id-token`**, fixing a check that had been failing
+   since Epoch 4 (Deviations 3).
+9. **`.claude/rules/cloudfront-origins.md`** — `cdk.md` had grown to 137 lines against
+   `CLAUDE.md`'s ~120, so its origins/OAC half split off at the seam Epoch 4's handoff named.
+
+### Acceptance test
+
+Run verbatim from `plan.md`'s Epoch 5 section, on `main` at `23e7a79`:
+
+```
+$ npm view @tylerschloesser/cdk-core version
+0.1.0
+$ scripts/consumer-smoke.sh                       # exit 0
+PASS: @tylerschloesser/cdk-core@0.1.0 synthesizes four stacks plus a PR stack outside this workspace
+$ scripts/consumer-smoke.sh --pack                # exit 0
+PASS: @tylerschloesser/cdk-core@0.1.0 synthesizes four stacks plus a PR stack outside this workspace
+$ claude plugin validate ./plugins/cdk-core
+✔ Validation passed
+$ claude plugin validate ./.claude-plugin/marketplace.json
+✔ Validation passed
+$ scripts/count-consumer-cdk.sh
+infra/bin/app.ts                         45
+total (non-blank, non-import, non-comment) 45
+(for reference: 89 non-blank lines, 60 line target)
+PASS: 45 <= 60
+```
+
+**A5, the end-to-end run.** A fresh `claude -p` session on `main` with the plugin loaded, given
+exactly `Change the ping response to `pong!` and verify it in a PR preview`, with no human step.
+It opened **PR #9**, which `gh pr view 9 --json state,comments` now reports `CLOSED`. The
+sticky comment while it was open read verbatim:
+
+```
+### PR Preview
+
+✅ deployed and e2e passed
+
+- URL: https://pr-9.preview.cdk-core.ty.ler.dev
+- Commit: d15ea9c6980be6b09a610ada38089bb2f8895449
+- deploy 97 s · push → comment 212 s
+```
+
+(The comment is sticky, so it now reads `🗑️ CdkCore-pr-9 is deleting.` — the green text above
+is the record.) `https://pr-9.preview.cdk-core.ty.ler.dev/api/ping` served `{"message":"pong!"}`
+while `https://cdk-core.ty.ler.dev/api/ping` went on serving `{"message":"pong"}`. The PR was
+closed without merging; production's ping is unchanged.
+
+The transcript summary, since nothing else survives: two commits, `Change ping response to
+pong!` and `verify-preview.sh: check for pong! not pong`, touching `apps/api/src/app.ts`,
+`e2e/api.spec.ts` and `scripts/verify-preview.sh` — all three places the string appears,
+including the `grep -q '"pong"'` in the shell script, which is the one a careless run misses
+because it fails only against a preview and passes against production. It ran `pnpm verify`,
+pushed, opened the PR, watched the run, ran `verify-preview.sh`, and reported. Its closing line
+was: *"Verified end to end: PR #9 deployed, the preview at `pr-9.preview.cdk-core.ty.ler.dev`
+returns `{"message":"pong!"}`, both the e2e suite and `verify-preview.sh` pass, and the sticky
+comment shows ✅."*
+
+**It took two attempts, and the first one is the finding** — see Deviations 5.
+
+### Deviations from the plan
+
+1. **A3 was missed by 3x, and `defineSiteStacks()` is the answer the plan prescribed.**
+   `scripts/count-consumer-cdk.sh` measured the hand-written `infra/bin/app.ts` at **178**
+   non-blank, non-import, non-comment lines against a target of 60. The epoch text says: "if it
+   is over, add a `defineSiteStacks()` convenience and re-count, but keep the constructs
+   primary." Done; the number is **45**. It is a *function, not a construct*, and it is the one
+   thing in the package that creates a `Stack` — which contradicted a flat claim in
+   `plan.md` → Architecture, now corrected there.
+
+   The refactor was proven a no-op the way Epoch 3's `behaviors.ts` extraction was:
+   `cdk synth --json` of `CdkCoreShared`, `CdkCorePreview` and `CdkCoreGithubOidc` is
+   **byte-identical** before and after (sha256 compared). `CdkCoreSite` differs in exactly one
+   resource, `AWS::CDK::Metadata`, whose deflated `Analytics` string decodes to the same
+   construct-type list with one `Resource` entry in a different position. `CdkCore-pr-99`
+   differs in exactly one resource, the KVS-route custom resource, in the `deployedAt`
+   timestamp — and two synths of *identical* source differ there too, so it is synth
+   nondeterminism, not the refactor. Production has since redeployed from it three times, green.
+
+2. **`npm pack` cannot pack this package, and it would have shipped a broken 0.1.0.**
+   The first run of `scripts/consumer-smoke.sh --pack` died at the consumer's install:
+
+   ```
+   npm error code EUNSUPPORTEDPROTOCOL
+   npm error Unsupported URL Type "catalog:": catalog:
+   ```
+
+   npm has no idea what pnpm's `catalog:` protocol means, so the tarball carried
+   `"aws-jwt-verify": "catalog:"` in `dependencies`. `pnpm pack`/`pnpm publish` rewrite catalog
+   and `workspace:` specifiers to real ranges (`{"aws-jwt-verify":"^5.2.1"}`, asserted by the
+   smoke script now). D7 and the Epoch 5 deliverable both said `npm publish`; both now say
+   `pnpm publish` and why. An npm version is permanent, so this is a bug you only get to find
+   once — finding it before the upload is the entire reason that script exists.
+
+3. **`scripts/verify-preview.sh`'s SSE check had been failing since Epoch 4.** Epoch 4 made
+   `/events/*` require a Cognito ID token; the script curls it unauthenticated, so it has been
+   getting 401 and reporting `only 0 "event: tick" frames arrived` ever since. Nothing caught
+   it because Epoch 4's handoff ran the script only in `--expect-absent` mode, where a request
+   that fails is the *expected* result — the one mode that would have shown the break was never
+   run after the change that broke it. It now takes `--id-token` (or `CDK_CORE_ID_TOKEN`) and,
+   given none, asserts the endpoint answers **401**, which is a better check than the one it
+   replaced: it proves from outside that the preview API enforces auth. Both modes measured
+   against PR 8: 7/0 without a token, 7/0 with one (spread 2002 ms, first gap 500 ms).
+
+4. **Epoch 4's explanation of the post-teardown failures is wrong, and the numbers are now
+   measured.** Its handoff attributes them to CloudFront serving already-cached 200s. The
+   residual answer is **403**, and it appears on `/api/*` too — which is `CACHING_DISABLED`, so
+   caching cannot be the cause. It is KVS propagation on the *delete* side: the key is gone
+   from the store immediately (`list-keys` → `[]`) but some edges still resolve it, rewrite to
+   a `/pr-<n>/` prefix whose objects are deleted, and get S3's `AccessDenied` — 403 not 404
+   because an OAC bucket policy grants `GetObject` and not `ListBucket`. Measured on
+   `CdkCore-pr-9`: **1 of 7** checks passing while the stack was still deleting, **3 of 7** the
+   moment `describe-stacks` stopped finding it, **7 of 7** under a minute after that. Risk 3 in
+   `plan.md` now carries the number.
+
+5. **A5 needed two attempts, and the first is a finding about the skill, not a failure to
+   hide.** The first fresh session made exactly the right change — including the
+   `e2e/api.spec.ts` assertion — committed it, and then stopped:
+
+   > Committed locally. Pushing the branch and opening a PR will kick off the preview-deploy
+   > pipeline against the AWS account — want me to go ahead with that?
+
+   In `-p` mode nobody answers, so the run ended. That is not a permission prompt and not a
+   wrong instinct in general: it is a model correctly treating "push, which deploys to AWS" as
+   outward-facing. But for this action it is wrong, and the `preview` skill was silent on it.
+   The skill now says opening the PR *is* the task — a preview is self-cleaning (teardown on
+   close, the sweeper behind it) and IAM-scoped to `<Prefix>-pr-*` — and, because "don't ask"
+   is only safe with its boundary written down, lists what still deserves a question: deleting
+   any stack, deploying production, publishing, force-pushing, the prod user pool. The second
+   run, with no other change, went straight through.
+
+6. **The npm scope did not exist, and that is a human action the plan did not list.**
+   `npm whoami` is **`tyle`**, so `@tylerschloesser` was not a scope on npm at all. Two
+   failures masked it in sequence: first `403 — Two-factor authentication or granular access
+   token with bypass 2fa enabled is required`, then, once a token was in place,
+   `404 Not Found - PUT … @tylerschloesser%2fcdk-core - Scope not found`. The user created a
+   free npm **organization** named `tylerschloesser`; renaming to `@tyle/cdk-core` was the
+   alternative and was rejected because the scope is baked into D7, the manifest, every
+   template, all four workflow templates, three skills, the README and two byte-equality tests.
+
+7. **The registry path of `consumer-smoke.sh` was broken in a way `--pack` could not show.**
+   It wrote the whole `name@range` string as the *value* of the manifest's dependency entry
+   (`"@tylerschloesser/cdk-core": "@tylerschloesser/cdk-core@latest"`). npm accepts that at
+   install time and then cannot resolve the module, surfacing three steps later as
+   `MODULE_NOT_FOUND`. `--pack` was unaffected because an absolute tarball path *is* a legal
+   version value. Fixed in `23e7a79`; both forms now pass.
+
+8. **The plugin's skills appear one session late**, in both the absolute-path and relative-`"."`
+   directory forms of `extraKnownMarketplaces`. The first session after the setting lands
+   registers the marketplace; the next one exposes its skills. Measured twice. Recorded in the
+   `new-site` skill, because a consumer hits it on day one.
+
+9. **The plugin's agent copies are not byte copies.** The plan says "copies of this repo's".
+   Two sentences were generalized: the repo-specific "read every rule file in `.claude/rules/`"
+   became conditional on the repo having them, and "no semicolons, single quotes" became "match
+   the surrounding style" — a consumer repo has its own conventions, and a plugin that asserts
+   this repo's is stating something false about theirs.
+
+10. **`.github/workflows/` gained no template for the workflow-template move**, but the
+    templates directory did gain non-`.yml` files. `workflow-templates.test.ts` pairs the two
+    directories by filename with a `.yml` filter, so `app.ts`, `cdk.json` and
+    `infra-package.json` sitting alongside `workflows/` are invisible to it. That is deliberate
+    and now stated in the test's header comment.
+
+11. **Two self-inflicted errors, both caught before they shipped.** (a) A chunk spec told an
+    implementer to restore a file with `git checkout -- infra/bin/app.ts` after a deliberate
+    break; `git checkout --` is *index*-relative, and at the moment the first agent ran it the
+    refactor was unstaged, so it reverted 133 lines of work. Restored by re-rendering
+    `infra/bin/app.ts` from its own template — which is a side benefit of the template being
+    byte-exact — and the fix is to commit before delegating anything that touches the same
+    file. (b) The `new-site` skill claimed `claude plugin marketplace list` cannot show a
+    marketplace registered through `extraKnownMarketplaces`. The verifier ran the command and
+    got it listed. The observation behind the claim was real but predated the registering
+    session; corrected in `cde5c4e`.
+
+### Left undone / untested
+
+- **The sweeper has still never deleted anything** (A8, unchanged since Epoch 3 — Epoch 6
+  owes it). Every live run this epoch again found either an open PR or nothing.
+- **KVS propagation on the *create* side is still unmeasured.** The delete side now has a
+  number (Deviations 4); the create side has never had to wait, so the 5-minute poll in
+  `pr-preview.yml` has never been exercised near its limit.
+- **The refresh path has never refreshed a real Cognito token** (unchanged from Epoch 4).
+- **`logout()` is still local-only** (unchanged from Epoch 4).
+- **Nothing has raced two PR deploys** (unchanged since Epoch 3).
+- **`CachePolicies.originDecides` is still unused** by the reference site.
+- **The published package has never been consumed by a *real* second repo** — only by
+  `consumer-smoke.sh`'s synthetic one. `new-site`'s checklist beyond the synth step (the
+  by-hand OIDC deploy, the Google redirect URIs, the repo variable) has been read for accuracy
+  but never walked end to end on a second site.
+- **`npm publish` from CI (trusted publishing)** is not set up; 0.1.0 went out from a laptop.
+- The Google consent screen is still in **Testing**, with the user as the only test user.
+
+### AWS resources alive after this epoch
+
+Unchanged from Epoch 4 — this epoch created **nothing new in AWS**. `CdkCoreShared`,
+`CdkCorePreview`, `CdkCoreSite`, `CdkCoreGithubOidc`, plus the two Secrets Manager secrets and
+the account-level budget. No `CdkCore-pr-*`.
+
+Proof, run at the end of the session:
+
+```
+$ AWS_PROFILE=admin pnpm --filter infra exec cdk-core sweep --site cdk-core.ty.ler.dev \
+    --stack-prefix CdkCore --repo tylerschloesser/cdk-core --dry-run
+(nothing to reconcile)                                    # exit 0
+$ scripts/verify-preview.sh 9 --expect-absent
+7 passed, 0 failed
+$ curl -fsS https://cdk-core.ty.ler.dev/api/ping
+{"message":"pong"}
+```
+
+Teardown commands are unchanged; see Epoch 4's entry. **The npm version is not
+tearable-down** — 0.1.0 is permanent past the 72-hour unpublish window, which closes
+2026-09-10.
+
+### What the next epoch needs to know
+
+- **Publish with `pnpm publish`, never `npm publish`**, and pack with `pnpm pack`. Everything
+  in this workspace is a `catalog:` specifier. `.claude/rules/typescript-config.md` has it.
+- **The scope is an npm org (`tylerschloesser`), not a personal scope.** The npm username is
+  `tyle`. Publishing needs a token that bypasses 2FA (a classic *Automation* token), or a real
+  TTY where npm's browser auth flow can run — the user's 2FA is a passkey, so `--otp` is not
+  available. 0.1.0 went out from the user's own terminal for that reason.
+- **`infra/bin/app.ts` is generated.** Editing it means editing
+  `plugins/cdk-core/skills/new-site/templates/app.ts` in the same commit, or
+  `workflow-templates.test.ts` goes red on a byte comparison. The substitution table lives in
+  that test.
+- **A preview's absence takes about a minute after the stack delete *completes*** to become
+  true at the edge, and `pr-teardown.yml` deliberately does not wait for the delete. Sequence
+  for a trustworthy `--expect-absent`: wait for `describe-stacks` to stop finding the stack,
+  wait another minute, then run it. A 403 while you wait is KVS propagation, not caching.
+- **`scripts/verify-preview.sh` needs `--id-token "$(scripts/preview-login.sh <n>)"`** to
+  actually stream the SSE check; without it the check asserts a 401.
+- **The plugin's skills arrive one session after `extraKnownMarketplaces` lands.** Do not debug
+  a manifest over this; start a second session.
+- **`.claude/rules/` is now seven files.** `cdk.md` (91) kept the stacks and the router;
+  `cloudfront-origins.md` (65) took OAC, the invoke permissions, the POST payload hash and the
+  distribution delete order; `plugin.md` (81) is new and covers the marketplace, the skills,
+  the generated `app.ts`, and — the part that is not obvious — that a skill has to say when
+  *not* to ask, which is what the first A5 run failed on.
+- **Epoch 6's list is unchanged and now has one more item**: race two PR deploys, cancel a
+  workflow mid-deploy, prove the sweeper's delete paths (A8), measure router
+  `ComputeUtilization`, consider trusted publishing — and decide whether
+  `.claude/skills/{epoch,handoff}` become a second plugin in this marketplace, which is now
+  cheaper than it was because the marketplace exists and is proven.
+- The repo is still **public**, and the confirm asked for after Epoch 1 is still outstanding.
+  This epoch added no new account detail to tracked files — the ids in
+  `plugins/cdk-core/skills/new-site/templates/app.ts` are `{{PLACEHOLDER}}` tokens, and the
+  ones in `scripts/consumer-smoke.sh` are dummies (`000000000000`, `smoke.example.com`).
+
+### The merge
+
+Epoch 5's branch merged as **PR #8** (`e9cda67`), squashed, with `CI` and `PR Preview` both
+green on the final commit and `pr-teardown.yml` green on the close. Three follow-up commits
+went straight to `main` — `61e857c`, `b03913c`, `23e7a79` — each with `deploy.yml` green on
+the push. `main` is the base for Epoch 6.
+
+**PR #9 is the A5 artifact and is closed unmerged on purpose.** It exists to prove the
+criterion, not to change production's ping response.
