@@ -1213,3 +1213,187 @@ the push. `main` is the base for Epoch 6.
 
 **PR #9 is the A5 artifact and is closed unmerged on purpose.** It exists to prove the
 criterion, not to change production's ping response.
+
+## Epoch 6 — Hardening and measurements — 2026-09-06 — DONE
+
+### Shipped
+
+Commits `1a6a538..28a0f13` on `epoch-6-hardening`, opened as **PR #10**.
+
+- **A8 is met.** The sweeper deleted real resources for the first time. Nothing in
+  `packages/cdk-core/src/sweep/` changed to make that true — the code was right; it had
+  never been given anything to reclaim.
+- `packages/cdk-core/src/handlers/preview-resources.ts` — `applyKvsRoute` now logs every
+  retry (key, operation, attempt, error name and message, backoff) and every success that
+  needed more than one attempt. `ApplyKvsRouteOptions.log` defaults to `console.warn`; three
+  tests in `packages/cdk-core/test/preview-resources.test.ts` cover it. Retry policy,
+  backoff and error classification are byte-for-byte unchanged.
+- `.github/workflows/publish.yml` + its template — npm **trusted publishing** (OIDC) on a
+  `v*` tag, plus `workflow_dispatch` with `dry_run` (default true). `publish` is now in
+  `WORKFLOW_NAMES` in `packages/cdk-core/test/workflow-templates.test.ts`.
+- `plugins/epochs/` — a second plugin in the marketplace, shipping generalized copies of
+  `epoch` and `handoff`. Registered in `.claude-plugin/marketplace.json`, enabled in
+  `.claude/settings.json`.
+- `packages/cdk-core/package.json` — **0.1.1**, the version `publish.yml` will publish.
+
+### Acceptance test
+
+Epoch 6's section states no single command; A8 is its acceptance criterion. Three stacks
+were deployed for closed PRs, and an orphan KVS key plus an orphan `pr-6/` S3 prefix were
+created by hand with no stack behind them. One `cdk-core sweep` (no `--dry-run`), exit 0:
+
+```
+KIND    ID                                PR  ACTION   REASON
+stack   CdkCore-pr-3                      3   deleted  PR is MERGED
+stack   CdkCore-pr-4                      4   deleted  PR is CLOSED
+stack   CdkCore-pr-9                      9   deleted  PR is CLOSED
+key     pr-6.preview.cdk-core.ty.ler.dev  6   deleted  PR is MERGED, stack gone
+prefix  pr-6/                             6   deleted  PR is MERGED, stack gone
+```
+
+Afterwards:
+
+```
+$ aws cloudfront-keyvaluestore list-keys ...        -> {"Items": []}
+$ aws s3 ls s3://cdkcorepreview-previewassets.../   -> (empty)
+$ cdk-core sweep ... --dry-run                      -> (nothing to reconcile)   # exit 0
+$ scripts/verify-preview.sh 9 --expect-absent       -> 7 passed, 0 failed
+$ curl -fsS https://cdk-core.ty.ler.dev/api/ping    -> {"message":"pong"}
+```
+
+The stacks' *own* keys and prefixes are removed by their stack deletes, which is why only
+`pr-6`'s appear as sweeper deletions. That is the case that had never run.
+
+### Deviations from the plan
+
+1. **KVS create-side propagation is ~29 s for a new hostname, not "a few seconds".** Seven
+   samples, a fresh hostname each time, put→first 200 at one PoP: median **29.0 s**, range
+   **14.3–29.4 s**. A hostname the edge has already seen re-propagates in ~1.4 s (6 samples,
+   median 1.42 s), so the cost is in the *novelty of the key*, not the write. Through a real
+   stack deploy (`CdkCore-pr-3`, whose hostname had existed in an earlier epoch) it was
+   ~10 s from `DeploymentKvsRoute` CREATE_COMPLETE to the first 200. `pr-preview.yml`'s
+   5-minute poll therefore has roughly **10x** headroom, not the ~100x a single fast sample
+   suggests. All single-PoP; global propagation is necessarily slower.
+2. **KVS delete-side propagation is ~46 ms at one PoP** (7 samples, median 46 ms, range
+   42–47, every sample ending in a genuine 404). This does **not** contradict revision 25's
+   ~1 minute: that number was the *last* edge to catch up during a teardown, this one is the
+   nearest edge. Both are true and they measure different things.
+3. **The router costs no measurable latency.** 40 interleaved pairs against
+   `pr-3.preview.cdk-core.ty.ler.dev` and production, order randomized within each pair,
+   after 5 warm-up requests to each: preview median **206.9 ms**, prod median **210.4 ms**,
+   per-pair delta median **-5.2 ms** (mean -3.3, range -142.5 to +130.0), preview faster in
+   26 of 40. The KVS read plus `updateRequestOrigin()` is below the noise floor. Caveat: the
+   two paths end at different Lambdas, so this bounds the router's cost rather than
+   isolating it.
+4. **Router `ComputeUtilization` p99 is 26.4–30.0%**, max 30, average 21.5–28.3, over four
+   1-minute buckets under ~800 requests. Dimensions are `FunctionName` **and
+   `Region=Global`** — a query with `FunctionName` alone returns no datapoints, silently.
+5. **Cancelling a workflow mid-deploy leaves a *working* preview, measured.** The run was
+   cancelled at 02:54:31 with `CdkCore-pr-10` in `CREATE_IN_PROGRESS`; GitHub reported it
+   cancelled by 02:54:54; CloudFormation reached **CREATE_COMPLETE at 02:55:58**, 87 s after
+   the runner died, and the preview answered 200 at 02:56:38. The next sweep kept all three
+   of its resources ("PR is open") and exited 0. The plan predicted this; nobody had watched
+   it happen.
+6. **A force-deleted branch tears down correctly.** Branch deleted 02:59:44 → GitHub closed
+   PR #11 → `pr-teardown.yml` fired at 02:59:48 (4 s) and the stack was gone by 03:02:12.
+   The workflow ran even though its branch no longer existed, which is the payoff of it
+   having no checkout step.
+7. **Two racing deploys both landed, but the race left no evidence.** `CdkCore-pr-4` and
+   `CdkCore-pr-9` deployed concurrently (96 s / 97 s, identical start); both keys landed;
+   the two custom-resource invocations overlapped by ~1.1 s. CloudWatch showed only the
+   runtime's own INIT/START/END lines, so there was no way to tell a survived conflict from
+   a lucky serialization. That is why `applyKvsRoute` now logs. **The retry path itself is
+   still unobserved** — see below.
+8. **`--provenance` is undocumented in `pnpm publish --help` but accepted.** A local
+   `pnpm publish --provenance --no-git-checks --dry-run` runs clean. Whether an attestation
+   is actually produced is unknown until the first real CI publish.
+9. **The `id-token: write` filter no longer means "touches AWS".** `publish.yml` requests it
+   for npm. `workflow-templates.test.ts`'s comment and `.claude/rules/workflows.md` both said
+   otherwise and were corrected in the same commit.
+
+### Left undone / untested
+
+- **The KVS retry path has still never been observed retrying.** The logging that would show
+  it shipped this epoch but went in *after* the race, so it has never run against a real
+  conflict. The next epoch that deploys two PR stacks at once should grep the two
+  `DeploymentPreviewResourcesHandler` log groups for `applyKvsRoute:`.
+- **Trusted publishing is unproven end to end.** The workflow, the template and the tag guard
+  are committed and `actionlint`-clean, but nothing has published through it. It needs the
+  npmjs.com trusted-publisher entry (a human action, below) and then a `v0.1.1` tag.
+- **Teardown leaves 55 orphaned CloudWatch log groups.** `/aws/lambda/CdkCore-pr-*` survives
+  its stack because Lambda, not CloudFormation, creates the group; all 55 have
+  `retentionInDays: null` (never expire). `describe-log-groups` reports `storedBytes: 0` for
+  every one, and that field lags, so read it as "negligible", not "proven zero". It does not
+  break A2 in any way that costs money today, but it is unbounded in time and the sweeper
+  does not know about log groups. Fixing it means giving the Lambdas an explicit `logGroup`
+  with `RemovalPolicy.DESTROY` — which will fail to deploy over an existing group, so the
+  orphans must be deleted first. Left for a decision rather than done late in an epoch.
+- **The `new-site` checklist has still never been walked on a real second repo.** Skipped by
+  the user's explicit decision this session: it needs a new repo, a second domain and a full
+  set of AWS resources, and is most of a session on its own. A3's human-actions half stays
+  unmeasured.
+- Unchanged from Epoch 5: the refresh path has never refreshed a real Cognito token;
+  `logout()` is local-only; `CachePolicies.originDecides` is unused by the reference site;
+  the Google consent screen is still in **Testing**.
+
+### AWS resources alive after this epoch
+
+The four permanent stacks — `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
+`CdkCoreGithubOidc` — plus the two Secrets Manager secrets and the $10 budget, all unchanged.
+
+**`CdkCore-pr-10` is alive and that is correct**: it is PR #10, this epoch's own branch,
+still open at the time of writing. `pr-teardown.yml` deletes it when the PR merges. The
+sweeper agrees:
+
+```
+$ AWS_PROFILE=admin pnpm --filter infra exec cdk-core sweep --site cdk-core.ty.ler.dev \
+    --stack-prefix CdkCore --repo tylerschloesser/cdk-core --dry-run
+stack   CdkCore-pr-10                      10  kept    PR is open
+key     pr-10.preview.cdk-core.ty.ler.dev  10  kept    stack still live
+prefix  pr-10/                             10  kept    stack still live
+```
+
+Every other stack this epoch created — `CdkCore-pr-3`, `-4`, `-9`, `-11` — is gone: the
+first three to the sweeper (the A8 proof above), the fourth to `pr-teardown.yml` after its
+branch was force-deleted.
+
+### What the next epoch needs to know
+
+- **A8 is met; the daily `cleanup.yml` is no longer an untested safety net.** The way to
+  re-prove it cheaply is the one used here: `cdk deploy CdkCore-pr-<n> --exclusively -c
+  pr=<n>` for an already-closed PR number, plus a hand-written key and `pr-<n>/` prefix for a
+  *different* closed PR, so the key and prefix paths are exercised independently of the
+  stack path. A stack delete removes its own key and prefix, so a single orphaned stack
+  proves only one of the three.
+- **`FunctionComputeUtilization` needs `Region=Global` alongside `FunctionName`.** Without
+  it `get-metric-statistics` returns an empty datapoint list and no error, which reads
+  exactly like "the function was never invoked".
+- **`pnpm --filter infra exec cdk-core sweep` prints a bare `undefined` after the table on a
+  non-zero exit.** It comes from pnpm's own error reporting, not the sweeper: the same
+  command as `node packages/cdk-core/dist/bin/sweep.js sweep …` is clean. Do not go looking
+  for it in `printTable`.
+- **Publishing 0.1.1 needs one human action first** (below), then a `v0.1.1` tag on `main`.
+  Dispatch `publish.yml` with `dry_run: true` first — it runs the tag guard, `pnpm verify`
+  and `consumer-smoke.sh --pack` without spending the version. `workflow_dispatch` only
+  appears once the workflow is on the default branch.
+- **The `epochs` plugin's skills will not appear until the session after this one**, per the
+  Epoch 5 finding. Do not debug the manifest; `claude plugin validate ./plugins/epochs`
+  passes.
+- **`.claude/rules/` is still seven files**; `workflows.md` grew a sixth workflow row and
+  three findings, `plugin.md` gained the second plugin.
+- The repo is still **public**, and the confirmation asked for after Epoch 1 is still
+  outstanding. This epoch added no new account detail to tracked files.
+
+**Human action owed — one, and it blocks the publish:** add the trusted publisher on
+npmjs.com for `@tylerschloesser/cdk-core` (Settings → Trusted publishers → GitHub Actions):
+organization/user `tylerschloesser`, repository `cdk-core`, workflow filename **`publish.yml`**,
+environment blank. The filename is the key npm matches on — renaming the workflow later
+breaks publishing with no error on this side.
+
+### The merge
+
+Epoch 6 is **PR #10**, with `CI` and `PR Preview` both green (preview deployed in 29 s,
+push → sticky comment 85 s, e2e passed). Not yet merged at the time this entry was written.
+
+**PR #11 is a throwaway** and is closed, unmerged, with its branch deleted — deleting the
+branch *was* the test.

@@ -50,7 +50,9 @@ survives, so anything the next session must know goes in those files before you 
   parameter properties, `import type`. No formatter; no semicolons; single quotes.
 - **`pnpm publish` and `pnpm pack`, never the `npm` forms** — npm cannot resolve a `catalog:`
   specifier and ships it verbatim into the tarball. `scripts/consumer-smoke.sh --pack` is the
-  check, and it must pass before any publish: a published version is permanent.
+  check, and it must pass before any publish: a published version is permanent. Releases go
+  through `publish.yml` (npm trusted publishing, OIDC, on a `v*` tag whose name must equal the
+  manifest version); npm keys that config on the **filename**, so never rename that workflow.
 - **`infra/bin/app.ts` is generated** from `plugins/cdk-core/skills/new-site/templates/app.ts`.
   Edit both in the same commit or `test/workflow-templates.test.ts` fails on a byte compare.
 - **Prod has no password path and that is load-bearing** (A7): the prod pool has no native

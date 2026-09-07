@@ -2,35 +2,36 @@
 
 > ## Status — 2026-09-06
 >
-> **Epochs 0 through 5 are complete. The plan is done.** `https://cdk-core.ty.ler.dev` is
-> **live**, deployed by `deploy.yml` on every push to `main`. **Every PR on this repo gets a
-> preview**, torn down on close with a daily `cdk-core sweep` behind it. **Auth is real** —
-> Google login on production and on previews through the bounce, Claude signing into a preview
-> with no browser, and no password path in prod. And now **the package is published**:
-> `@tylerschloesser/cdk-core@0.1.0` is on public npm (tag `v0.1.0`), the Claude Code plugin
-> `cdk-core@tylerschloesser` ships three skills, and both were proven from outside this
-> workspace — `scripts/consumer-smoke.sh` installs the published tarball into a throwaway
-> project and synthesizes all five stacks with no AWS credentials.
+> **Epochs 0 through 6 are complete. The plan is done, and every acceptance criterion is
+> met.** `https://cdk-core.ty.ler.dev` is **live**, deployed by `deploy.yml` on every push to
+> `main`. **Every PR on this repo gets a preview**, torn down on close with a daily
+> `cdk-core sweep` behind it. **Auth is real** — Google login on production and on previews
+> through the bounce, Claude signing into a preview with no browser, and no password path in
+> prod. **The package is published**: `@tylerschloesser/cdk-core@0.1.0` is on public npm, and
+> `0.1.1` is committed and waiting on one npmjs.com setting. The marketplace now ships **two**
+> plugins: `cdk-core` (three skills) and `epochs` (the session mechanism itself).
 >
-> Alive in the account, **unchanged by Epoch 5, which created nothing in AWS**: `CdkCoreShared`,
-> `CdkCorePreview` (preview pool `us-east-1_D9US7hu40` + the `claude` machine user),
-> `CdkCoreSite` (prod pool `us-east-1_havW5h4hk`), `CdkCoreGithubOidc`, two Secrets Manager
-> secrets, and an account-wide $10/month budget. `pnpm verify`, `pnpm dev` and `pnpm e2e` still
-> need no credentials, and neither does `consumer-smoke.sh`. Epoch 5 merged as **PR #8**
-> (`e9cda67`) plus three follow-ups on `main` (`61e857c`, `b03913c`, `23e7a79`), every one with
-> `deploy.yml` green. **No PR stack is alive**, `cdk-core sweep --dry-run` exits 0, and
-> `scripts/verify-preview.sh 9 --expect-absent` is 7 passed / 0 failed. `main` is the base for
-> Epoch 6, which is **optional** — the next session runs `/epoch 6` only if the user wants the
-> hardening work.
+> **Epoch 6 was the hardening pass, and it was mostly measurement.** Almost nothing about the
+> system changed; what changed is that the claims are now numbers. The sweeper deleted real
+> resources for the first time (A8). Two PR deploys raced. A workflow was cancelled mid-deploy
+> and a branch was force-deleted, both deliberately. KVS propagation, router compute and router
+> latency all have medians and ranges. Three of the four failure cases D3 reasoned about have
+> now been run.
 >
-> **Measured against the [acceptance criteria](#acceptance-criteria):** A1, A2, A4, A6 and A7
-> met in earlier epochs and unchanged. **A3 met — 45 non-import CDK lines against a target of
-> 60**, after `defineSiteStacks()`; the hand-written form measured 178. **A5 met** — a fresh
-> `claude -p` session on `main` with the plugin loaded took "Change the ping response to
-> `pong!` and verify it in a PR preview" to PR #9 with a green preview, an authenticated e2e
-> pass and a sticky comment, with no human step. It took **two attempts**, and the first is a
-> finding recorded below. **A8 is the only criterion still unmet** and is Epoch 6's: the
-> sweeper's delete paths have only ever run against fakes.
+> Alive in the account: `CdkCoreShared`, `CdkCorePreview` (preview pool `us-east-1_D9US7hu40` +
+> the `claude` machine user), `CdkCoreSite` (prod pool `us-east-1_havW5h4hk`),
+> `CdkCoreGithubOidc`, two Secrets Manager secrets, and an account-wide $10/month budget —
+> all unchanged by Epoch 6. `pnpm verify`, `pnpm dev` and `pnpm e2e` still need no credentials,
+> and neither does `consumer-smoke.sh`. Epoch 6 is **PR #10**; `CdkCore-pr-10` is alive only
+> because that PR is open, and `pr-teardown.yml` takes it on merge. Every other stack Epoch 6
+> created (`-pr-3`, `-4`, `-9`, `-11`) is gone, three of them **to the sweeper itself**.
+>
+> **Measured against the [acceptance criteria](#acceptance-criteria): all eight are met.** A1,
+> A2, A4, A6 and A7 in earlier epochs and unchanged. A3 at 45 non-import CDK lines against a
+> target of 60 — though its human-actions half is still unmeasured, now by decision rather than
+> omission. A5 met in Epoch 5 on the second attempt. **A8 met in Epoch 6**, and it is the one
+> that took a deliberately broken account to prove: three real stacks, one orphaned key and one
+> orphaned prefix, all reclaimed by a single sweep.
 >
 > Corrections made against measurement or a failing run, each marked **`[revised]`** in place:
 >
@@ -171,11 +172,68 @@
 >    The first session registers the marketplace; the next exposes the skills. Measured twice.
 >    Not a broken manifest, and not worth debugging — start a second session.
 >
-> **Human actions owed:** none for Epoch 6. Epoch 5's are done: the npm **organization**
-> `tylerschloesser` exists (the npm username is `tyle`, so it was not a personal scope — the
-> plan had not anticipated needing to create it), and 0.1.0 is published. Note for any future
-> publish: the user's npm 2FA is a **passkey**, so `--otp` is not available; it needs either a
-> classic *Automation* token or a real TTY where npm's browser auth flow can run.
+> 29. **[Epoch 6] A8 needed a deliberately broken account, and the sweeper's code needed no
+>    change.** Every earlier live run found an open PR or nothing, so its delete paths had only
+>    run against fakes. Three stacks deployed for already-closed PRs, plus a hand-written key
+>    and `pr-6/` prefix under a *fourth* closed PR, gave one sweep all three paths at once —
+>    the key and prefix have to be orphaned under a different number than any stack, because a
+>    stack delete removes its own key and prefix and would have hidden two of the three.
+> 30. **[Epoch 6] KVS create-side propagation is ~29 s for a new hostname, not "a few
+>    seconds".** Median 29.0 s, range 14.3-29.4 (7 samples, fresh hostname each, one PoP). A
+>    hostname the edge already knows re-propagates in ~1.4 s, so the cost is the novelty of the
+>    key. `pr-preview.yml`'s 5-minute poll has ~10x headroom, not ~100x. D2 has it.
+> 31. **[Epoch 6] KVS delete-side propagation is ~46 ms at the nearest PoP** (median of 7,
+>    range 42-47, every sample ending in a real 404). Revision 25's ~1 minute is not wrong:
+>    that measured the *last* edge to catch up during a teardown. Different things.
+> 32. **[Epoch 6] The router costs no measurable latency.** 40 interleaved pairs, order
+>    randomized within each pair: preview median 206.9 ms, prod 210.4 ms, per-pair delta
+>    **-5.2 ms**. The KVS read and `updateRequestOrigin()` are under the noise floor. Router
+>    `ComputeUtilization` p99 is **26.4-30.0%**, max 30.
+> 33. **[Epoch 6] `FunctionComputeUtilization` needs `Region=Global` as well as
+>    `FunctionName`.** With `FunctionName` alone `get-metric-statistics` returns an empty
+>    datapoint list and no error, which is indistinguishable from "never invoked".
+> 34. **[Epoch 6] Cancelling a deploy mid-flight really does leave a working preview**, and a
+>    force-deleted branch really does tear down. Both were predicted by D3 and neither had been
+>    watched: CloudFormation finished 87 s after the cancelled runner died and the preview
+>    served 200; a deleted branch had `pr-teardown.yml` running 4 s later, with no branch to
+>    check out — which is exactly why that workflow has no checkout.
+> 35. **[Epoch 6] The KVS retry loop was silent, so the race proved less than it looked.** Both
+>    concurrent deploys landed their keys and their handler invocations overlapped by ~1.1 s,
+>    but CloudWatch held only the runtime's INIT/START/END lines — a survived conflict and a
+>    lucky serialization are indistinguishable in that log. `applyKvsRoute` now logs every
+>    retry and every success that needed one. **The retry path is still unobserved**: the
+>    logging shipped after the race.
+> 36. **[Epoch 6] `id-token: write` no longer means "touches AWS".** `publish.yml` requests it
+>    for npm's OIDC and touches no AWS at all, so `workflow-templates.test.ts`'s pairing
+>    comment and `.claude/rules/workflows.md` both said something false and were corrected in
+>    the same commit. The pairing itself still works — it selects OIDC-authenticating
+>    workflows, whichever the audience.
+> 37. **[Epoch 6] Trusted publishing needs npm >= 11.5.1 even though we publish with pnpm**,
+>    because pnpm hands the registry call to the npm CLI and node 22 bundles npm 10.x. npm also
+>    matches its trusted-publisher config on the **workflow filename**, so `publish.yml` cannot
+>    be renamed without breaking publishing with no error on this side. `--provenance` is
+>    undocumented in `pnpm publish --help` but accepted; whether an attestation is produced is
+>    unknown until the first CI publish.
+> 38. **[Epoch 6] A torn-down PR stack leaves its CloudWatch log groups behind.** 55
+>    `/aws/lambda/CdkCore-pr-*` groups survive, all with no retention, because Lambda creates
+>    them and CloudFormation therefore does not own or delete them. `storedBytes` reads 0 for
+>    all of them and that field lags, so read it as negligible rather than zero. Nothing in
+>    A2's teardown claim costs money today, but the leak is unbounded and the sweeper does not
+>    know about log groups. The fix — an explicit `logGroup` with `RemovalPolicy.DESTROY` —
+>    cannot be deployed over the existing groups, so it needs them deleted first.
+> 39. **[Epoch 6] `pnpm --filter infra exec cdk-core sweep` prints a bare `undefined`** after
+>    the table whenever the sweep exits non-zero. It is pnpm's error reporting, not the
+>    sweeper: the same run as `node packages/cdk-core/dist/bin/sweep.js` is clean. Nobody had
+>    seen it because every previous live run printed `(nothing to reconcile)` and exited 0.
+>
+> **Human actions owed — one, and it blocks publishing 0.1.1:** add the trusted publisher on
+> npmjs.com for `@tylerschloesser/cdk-core` (Settings → Trusted publishers → GitHub Actions):
+> organization/user `tylerschloesser`, repository `cdk-core`, workflow filename **`publish.yml`**,
+> environment blank. Then tag `v0.1.1` on `main`; dispatch `publish.yml` with `dry_run: true`
+> first, which runs the tag guard, `pnpm verify` and `consumer-smoke.sh --pack` without spending
+> the version. Epoch 5's actions are done: the npm **organization** `tylerschloesser` exists (the
+> npm username is `tyle`), and 0.1.0 is published. The user's npm 2FA is a **passkey**, which is
+> the whole reason trusted publishing was worth building.
 >
 > **One thing for the user to confirm (outstanding since Epoch 1):** the repo is public per
 > Epoch 1's plan text, and `plan.md`, `progress.md`, `README.md`, `CLAUDE.md`, `.claude/rules/`,
@@ -183,8 +241,7 @@
 > hosted-zone ids, the preview distribution/bucket/KVS ids, the deploy role ARN, GitHub's
 > numeric owner/repo ids and both Cognito pool ids with their app client ids. None of it is a
 > credential — pool and client ids appear in every authorize URL — but it is world-readable.
-> **Epoch 5 added none of it**: the ids in the `new-site` templates are `{{PLACEHOLDER}}` tokens
-> and the ones in `scripts/consumer-smoke.sh` are dummies. Still worth an answer before more
+> **Neither Epoch 5 nor Epoch 6 added any of it.** Still worth an answer before more
 > account detail is committed.
 
 ## How to use this document
@@ -309,7 +366,14 @@ back, `ItemCount` unchanged), so the Delete path needs no pre-check and a stack 
 wedge on a key the sweeper already removed. No write rate limit is published;
 API calls cost $1 per 1,000. `ListKeys` exists (page ≤ 50, returns values). Propagation to
 the edge is "a few seconds" (2023 launch blog; no SLA) — the deploy workflow polls the preview
-URL before running e2e. Calling the KVS API needs SigV4A; Lambda execution-role credentials
+URL before running e2e. **[revised, Epoch 6] Measured, and "a few seconds" is optimistic for a
+*new* hostname: median 29.0 s, range 14.3-29.4 s** (7 samples, a fresh hostname each, put to
+first 200 at one PoP). A hostname that PoP has already seen re-propagates in ~1.4 s, so the
+cost tracks the novelty of the key rather than the write. The delete side at the same PoP is
+~46 ms (median of 7, range 42-47, every sample ending in a real 404) — which does not
+contradict revision 25's ~1 minute: that is the *last* edge to catch up, this is the nearest
+one. `pr-preview.yml`'s 5-minute poll therefore has ~10x headroom, not the ~100x a single fast
+sample would suggest. Calling the KVS API needs SigV4A; Lambda execution-role credentials
 are fine, but a CI runner using the *global* STS endpoint gets a v1 token that fails — the
 custom resource runs in Lambda precisely to avoid this. **[revised, Epoch 2] SigV4A bites a
 second, sharper way: the AWS SDK ships no SigV4A implementation.** It looks one up in a
@@ -341,16 +405,27 @@ S3 prefixes in the preview bucket.
   notice. Rejected for writes; CI keeps the sweeper, where "is the PR closed?" is a GitHub
   question anyway.
 
-**Failure cases the design must survive.**
+**Failure cases the design must survive.** **[revised, Epoch 6] Three of these four have now
+been run rather than reasoned about**; each is annotated below.
 - *Two PR deploys land at once*: both custom resources describe the store, one `UpdateKeys`
   wins, the other gets 409/400, re-describes, retries with 100–500 ms jitter, up to 10 times.
+  **[Epoch 6] Both keys land** — two stacks deployed concurrently (96 s / 97 s, identical
+  start) and the two handler invocations overlapped by ~1.1 s. Whether either actually
+  *retried* is still unknown: the loop logged nothing. It does now, so the next concurrent
+  pair will say.
 - *Cancelled workflow*: CloudFormation keeps going (`cancel-in-progress: false`, same
   concurrency group for deploy and teardown), so the stack ends `*_COMPLETE` or `ROLLBACK_*`;
   on rollback the custom resource's Delete runs and removes the key. The sweeper covers the
-  rest.
+  rest. **[Epoch 6] Measured**: a run cancelled with the stack in `CREATE_IN_PROGRESS` was
+  reported cancelled 23 s later, and CloudFormation reached `CREATE_COMPLETE` **87 s after the
+  runner died**, leaving a preview that served 200. The next sweep kept it ("PR is open") and
+  exited 0.
 - *Force-deleted branch / PR closed while a deploy is in flight*: teardown waits in the same
   concurrency group, then `delete-stack`. If the workflow never ran (GitHub outage, disabled
-  Actions), the daily sweeper finds a stack whose PR is closed and deletes it.
+  Actions), the daily sweeper finds a stack whose PR is closed and deletes it. **[Epoch 6]
+  Measured**: deleting the branch closed the PR, `pr-teardown.yml` fired **4 s** later and the
+  stack was gone in ~2.5 min — and it ran despite its own branch no longer existing, which is
+  the payoff of that workflow having no checkout step.
 - *Stack `DELETE_FAILED`* (e.g. the custom resource Lambda was already gone): the sweeper
   retries `delete-stack`; if the key is still present with no stack, the sweeper deletes the
   key and the `pr-<n>/` prefix directly. The sweeper exits non-zero if anything remains.
@@ -482,7 +557,12 @@ APIs with `x-id-token: <IdToken>` or seeds a browser: the app's own storage key
 **Decision.** Publish `@tylerschloesser/cdk-core` to npmjs.org with `--access public`. Manual
 `pnpm publish` from a tagged commit in Epoch 5 (**[revised, Epoch 5]** `npm publish` cannot
 work — it leaves `catalog:` specifiers unresolved in `dependencies`); GitHub Actions trusted publishing is a later
-option.
+option. **[revised, Epoch 6] That later option is built**: `.github/workflows/publish.yml`
+publishes by OIDC on a `v*` tag, with no token anywhere. It still runs `pnpm publish`, because
+the `catalog:` problem is unchanged, and it upgrades npm first — pnpm hands the registry call
+to the npm CLI and trusted publishing needs npm >= 11.5.1, which node 22 does not bundle. npm
+matches the trusted-publisher config on the **workflow filename**, so `publish.yml` cannot be
+renamed without breaking publishing silently.
 
 **Why.** GitHub Packages needs a token with `read:packages` in every consumer's `.npmrc` and
 every CI job (the user's `gh` token lacks even that scope today), for no benefit on a public
@@ -494,7 +574,11 @@ unpublished in 2021 and may be blocked; the scope is free and unambiguous.
 **Decision.** `plan.md` (this file, corrected in place), `progress.md` (append-only log),
 `/epoch <n>` and `/handoff` skills in `.claude/skills/`, sonnet `implementer`/`verifier`
 agents, `CLAUDE.md` + `.claude/rules/`. No hooks, no custom loop. Details in
-[Session mechanism](#session-mechanism).
+[Session mechanism](#session-mechanism). **[revised, Epoch 6] The two skills now also ship as a
+second plugin, `epochs`, in this repo's marketplace**, which is what the Epoch 6 line
+recommended. This repo still runs its own `.claude/skills/` copies: those carry its AWS
+specifics, and a plugin asserting them would state something false about a consumer's repo.
+Four rules are generalized in the plugin copy and nothing else.
 
 **Why.** Every primitive needed exists today (verified against code.claude.com docs
 2026-09-06): skills with `disable-model-invocation`, `argument-hint`, `$0`, and `` !`cmd` ``
@@ -1392,6 +1476,30 @@ trusted:
    command by command; nothing in it has been done end to end by someone starting from nothing,
    which is the only test of an onboarding document that counts.
 
+**[revised, Epoch 6] What was actually done, against that list.** Items 1-6 are done; item 7
+was skipped by the user's explicit decision, because a real second site is most of a session on
+its own. Numbers are in `progress.md`.
+
+1. **A8 met.** Three stacks for closed PRs plus an orphan key and prefix under a fourth; one
+   sweep reclaimed all of it. The sweeper's code needed no change — it was right, it had
+   simply never been given anything to delete.
+2. **The race is measured, the cancel is measured, the force-deleted branch is measured.**
+   Both concurrent deploys landed their keys; a run cancelled mid-`CREATE_IN_PROGRESS` left a
+   working preview 87 s later and a clean sweep; a deleted branch tore its stack down in
+   ~2.5 min. What is *not* measured is the retry loop actually retrying — it logged nothing at
+   the time, and now does.
+3. **Create-side propagation: median 29.0 s for a new hostname**, ~1.4 s for one the edge has
+   seen. D2 carries the numbers.
+4. **Router `ComputeUtilization` p99 26.4-30.0%, max 30**, and **no measurable added latency** —
+   40 interleaved pairs put the per-pair delta at -5.2 ms, i.e. under the noise floor.
+5. **Trusted publishing is built** (`publish.yml`), and blocked only on one npmjs.com setting.
+6. **The `epochs` plugin exists**, and D8 records the shape.
+
+One thing this epoch found that the list did not anticipate: **a torn-down PR stack leaves its
+CloudWatch log groups behind** — Lambda creates them, not CloudFormation, so nothing deletes
+them, and all 55 have no retention. They cost nothing measurable today and the sweeper does not
+know about them. `progress.md` has the fix and why it was not applied late in an epoch.
+
 ## Acceptance criteria
 
 Per-epoch tests are above. The overall bar, checked at the end of Epoch 5 and recorded with
@@ -1401,12 +1509,12 @@ numbers in `progress.md` (the user adjusts the targets; these are proposals):
 | --- | --- | --- | --- |
 | A1 | PR preview reachable from push | ≤ 5 min first deploy, ≤ 3 min repeat (yahn: ~6 min) | **met, Epoch 3 [revised]**: new stack 95 s / 93 s, repeat 29 s / 33 s at the deploy step; **88 s** from a real `git push` to the sticky comment. Four observations, not a randomized study — the headroom is ~2x |
 | A2 | Teardown leaves zero billable resources | 0 stacks, 0 KVS keys, 0 `pr-*/` prefixes after close | **met, Epoch 3 [revised]**: after both throwaway PRs closed, `cdk-core sweep --dry-run` printed `(nothing to reconcile)` and exited 0, `list-keys` returned `{"Items": []}`, and the preview bucket was empty |
-| A3 | Onboarding cost | ≤ 60 non-import CDK lines for four stacks; ≤ 30 min of human actions | **met, Epoch 5 [revised]**: **45** lines, from **178** before `defineSiteStacks()` (`scripts/count-consumer-cdk.sh`, which excludes blank, `import` and comment lines and prints the raw count too). The human-actions half is *unmeasured* — the `new-site` checklist has been verified command by command but never walked end to end on a second site |
+| A3 | Onboarding cost | ≤ 60 non-import CDK lines for four stacks; ≤ 30 min of human actions | **met, Epoch 5 [revised]**: **45** lines, from **178** before `defineSiteStacks()` (`scripts/count-consumer-cdk.sh`, which excludes blank, `import` and comment lines and prints the raw count too). The human-actions half is *unmeasured* — the `new-site` checklist has been verified command by command but never walked end to end on a second site. **[Epoch 6]** Still unmeasured, and now deferred by decision rather than by omission: the walk needs a second repo, a second domain and a full set of AWS resources, which the user chose not to spend a session on |
 | A4 | Local dev | `pnpm dev` serves the SPA and `/api/ping` within 10 s; no credentials | **met, Epoch 1 [revised]**: 1.14 s warm / 2.85 s cold, medians of 7 interleaved samples |
 | A5 | Claude end-to-end | open → preview → authenticated e2e → verified, zero human steps | **met, Epoch 5**, on the second attempt: a fresh `claude -p` session on `main` with the plugin loaded opened **PR #9**, preview green in 97 s (212 s push → sticky comment), e2e passed including the authenticated specs, and it reported back — no human step. The first attempt stopped to ask whether to push; the `preview` skill was silent on that and now is not (revision 26) |
 | A6 | SSE | 5 events with ≥ 400 ms spread arrive incrementally through CloudFront, with auth | **met, Epoch 4 [revised]**: with a Cognito ID token through the preview distribution, spread **median 2003 ms (range 2000–2003, 7 samples)** and a 1st→2nd gap of **500 ms (range 499–501)** — the producer's interval exactly. Unauthenticated: 2004 ms preview / 2040 ms production (Epochs 2–3). `deploy.yml` no longer streams against production, because `/events/tick` now needs auth and prod has no machine user |
 | A7 | Machine auth absent from prod | prod client `ExplicitAuthFlows` = refresh only; prod pool has no native users; preview token → prod API 401 | **met, Epoch 4**: `["ALLOW_REFRESH_TOKEN_AUTH"]`, `[]`, and 401 — all three read back from the live account |
-| A8 | Sweeper | finds and removes a deliberately orphaned key, prefix, and stack (Epoch 6 or by hand in 3) | **not met, still owed.** Epoch 3 built the sweeper and proved the *negative*: every live run found either an open PR (kept, correctly) or nothing. Its delete paths have only ever run against fakes |
+| A8 | Sweeper | finds and removes a deliberately orphaned key, prefix, and stack (Epoch 6 or by hand in 3) | **met, Epoch 6**: one live `cdk-core sweep` deleted three real stacks (`CdkCore-pr-3/-4/-9`, all closed PRs), one orphaned KVS key and one orphaned `pr-6/` prefix, exit 0. Afterwards `list-keys` was `[]`, the preview bucket was empty, `--dry-run` exited 0 and `verify-preview.sh 9 --expect-absent` was 7 passed / 0 failed. The key and prefix were orphaned under a *different* PR number than any stack on purpose: a stack delete removes its own key and prefix, so one orphaned stack would have proven only one of the three paths |
 
 ## Cost guardrails
 

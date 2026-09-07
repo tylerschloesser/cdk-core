@@ -38,6 +38,19 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
 - `actionlint .github/workflows/*.yml` before committing one. Its embedded shellcheck is why
   `"$PR"` is quoted everywhere.
 
+## Proving the sweeper still deletes (A8)
+
+It deletes nothing on a healthy account, so a green run says nothing. To re-prove it, break the
+account on purpose: `cdk deploy CdkCore-pr-<n> --exclusively -c pr=<n>` for an **already-closed**
+PR number, and separately hand-write a KVS key and a `pr-<m>/` S3 object under a *different*
+closed PR. Both halves are needed — a stack delete removes its own key and prefix, so an
+orphaned stack alone exercises one of the three paths and hides the other two.
+
+**`pnpm --filter infra exec cdk-core sweep` prints a bare `undefined` after the table** whenever
+the sweep exits non-zero. That is pnpm's error reporting, not the sweeper; `node
+packages/cdk-core/dist/bin/sweep.js sweep ...` is clean. Nobody saw it for three epochs because
+every live run printed `(nothing to reconcile)` and exited 0.
+
 ## The things that bit
 
 1. **The deploy role trusts `ref:refs/heads/main` and `pull_request`, and nothing else.** A
