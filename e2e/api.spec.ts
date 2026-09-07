@@ -4,7 +4,7 @@ test('ping round-trips through apiFetch', async ({ page }) => {
   await page.goto('/')
 
   await page.getByTestId('ping').click()
-  await expect(page.getByTestId('ping-result')).toHaveText('pong')
+  await expect(page.getByTestId('ping-result')).toHaveText('pong!')
 
   await expect(page.getByTestId('error')).not.toBeVisible()
 })

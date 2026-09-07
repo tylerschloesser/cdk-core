@@ -12,7 +12,7 @@ export function createApiApp(): Hono {
 
   app.get('/api/ping', (c) => {
     c.header('Cache-Control', 'no-store')
-    return c.json({ message: 'pong' })
+    return c.json({ message: 'pong!' })
   })
 
   app.post('/api/echo', async (c) => {
