@@ -55,6 +55,7 @@ export interface ApplyKvsRouteOptions {
   readonly sleep?: (ms: number) => Promise<void>
   readonly random?: () => number
   readonly maxAttempts?: number
+  readonly log?: (line: string) => void
 }
 
 function physicalResourceId(kvsArn: string, key: string): string {
@@ -83,6 +84,10 @@ const defaultSleep = (ms: number): Promise<void> =>
  *
  * A delete against a key or a store that is already gone is treated as
  * success, so a stack delete never wedges on it.
+ *
+ * Every retry, and every success that needed one, is logged: a race between
+ * two PR stacks that leaves no trace cannot be shown to have been survived
+ * rather than merely not encountered.
  */
 export async function applyKvsRoute(
   store: KvsStore,
@@ -92,6 +97,7 @@ export async function applyKvsRoute(
   const sleep = options.sleep ?? defaultSleep
   const random = options.random ?? Math.random
   const maxAttempts = options.maxAttempts ?? 10
+  const log = options.log ?? console.warn
 
   const id = physicalResourceId(request.kvsArn, request.key)
 
@@ -111,6 +117,11 @@ export async function applyKvsRoute(
           deletes: [{ key: request.key }],
         })
       }
+      if (attempt > 1) {
+        log(
+          `applyKvsRoute: key=${request.key} operation=${request.operation} succeeded on attempt ${attempt}`,
+        )
+      }
       return id
     } catch (error) {
       if (request.operation === 'delete' && isNotFound(error)) {
@@ -120,6 +131,11 @@ export async function applyKvsRoute(
         throw error
       }
       const ms = 100 + random() * 400
+      const name = (error as { name?: unknown } | null)?.name
+      const message = (error as { message?: unknown } | null)?.message
+      log(
+        `applyKvsRoute: key=${request.key} operation=${request.operation} attempt=${attempt}/${maxAttempts} error=${String(name)} message=${String(message)} retrying in ${Math.round(ms)}ms`,
+      )
       await sleep(ms)
     }
   }

@@ -1,0 +1,99 @@
+# Publishes {{PACKAGE_NAME}} to npm via trusted publishing (OIDC) on
+# a `v*` tag push.
+#
+# Trusted publishing means this workflow authenticates to npm the same way
+# the other workflows authenticate to AWS: it presents a short-lived OIDC
+# token instead of holding a long-lived secret. That matters here more than
+# usual — the user's npm account's second factor is a passkey, so there is no
+# `--otp` to pass a script, and a passkey prompt needs a real TTY a workflow
+# can never provide. No `NPM_TOKEN` exists anywhere in this repo on purpose;
+# adding one back would be a regression. The tradeoff is that npmjs.com's
+# trusted-publisher config is keyed on this file's *name* — renaming it away
+# from `publish.yml` breaks publishing with no error here, only a silently
+# rejected publish on npm's side.
+#
+# `pnpm publish`, never `npm publish`: this workspace's manifests carry
+# `catalog:` specifiers that only pnpm knows how to rewrite into real semver
+# ranges as it packs (CLAUDE.md, typescript-config.md) — `npm publish` would
+# ship `"aws-jwt-verify": "catalog:"` verbatim and break every consumer's
+# install. `--no-git-checks` because this job runs on a tag, which checks out
+# as a detached HEAD, and pnpm's default publish-branch check assumes
+# `master`. `--provenance` because pnpm's own maintainers recommend it
+# explicitly for the OIDC path, and it costs nothing extra once `id-token:
+# write` is already granted for the publish itself. `access: public` is not
+# passed here because it is already in the package's `publishConfig`.
+#
+# The tag-vs-manifest guard runs before anything else that matters because a
+# published version is permanent: there is no unpublishing a wrong one back
+# into "never happened", so the tag a release is built from and the version
+# npm will record for it have to agree before the job does any real work.
+# `scripts/consumer-smoke.sh --pack` runs before the publish step, not after
+# — it is the check that catches an unresolved `catalog:` specifier or a
+# broken `exports` map while the tarball is still disposable; running it
+# after publish would only prove the mistake had already shipped.
+#
+# `workflow_dispatch` with `dry_run` (default true) runs every step through
+# the pack check without publishing, so the OIDC/tag-guard/pack path can be
+# exercised on demand without spending a version number — an npm version is
+# permanent, so burning one just to test the pipeline is not an option.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run every check without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # npm 11.5.1 is the first release that understands trusted
+      # publishing, and `pnpm publish` hands the actual registry call to the
+      # npm CLI — so the npm that `setup-node` bundles with node 22 (10.x) is
+      # too old even though pnpm itself is current. This is the most likely
+      # explanation for the 404s reported against pnpm 11 + OIDC
+      # (pnpm/pnpm#11513), so pin it out of the way rather than debug it later
+      # against a permanent version number.
+      - run: npm install -g npm@latest
+
+      - run: pnpm install --frozen-lockfile
+
+      # Publishing a tag that does not match the manifest is how a wrong
+      # version gets published, and a published version is permanent.
+      - name: Verify tag matches package version
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          PKG_VERSION="v$(node -p "require('./packages/cdk-core/package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "$PKG_VERSION" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version $PKG_VERSION" >&2
+            exit 1
+          fi
+
+      - run: pnpm verify
+
+      - run: scripts/consumer-smoke.sh --pack
+
+      - name: Publish
+        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
+        run: pnpm --filter {{PACKAGE_NAME}} publish --provenance --no-git-checks

@@ -72,7 +72,9 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
    generated source never does this.
 2. **`aws cloudfront test-function` is the only thing that prints the real error.** Run it
    against the DEVELOPMENT stage before publishing anything. It also reports
-   `ComputeUtilization` (0-100); the reference router sits at ~8.
+   `ComputeUtilization` (0-100), where the reference router sits at ~8 — but that is one
+   synthetic invocation, and **at the real edge the p99 is 26.4-30.0% (max 30)**, measured
+   under ~800 requests. Treat `test-function`'s figure as a smoke test, not a budget.
 3. **A KVS cannot be associated with a function until it reports `READY`.** `CreateFunction`
    against a `PROVISIONING` store fails with
    `InvalidArgument: ... cannot be associated before the resource is provisioned`
@@ -86,6 +88,20 @@ as a deployed artifact. It is associated as `viewer-request` on **every** behavi
    That is why the `backends` keys and their path prefixes are a contract shared by
    `PreviewSite`, `PreviewDeployment`, `apps/web` and Vite's dev proxy — adding a third prefix
    means adding it in all of them.
+6. **Reading the metric needs `Region=Global` as well as `FunctionName`.** With `FunctionName`
+   alone, `cloudwatch get-metric-statistics` returns an empty datapoint list and *no error*,
+   which reads exactly like a function that was never invoked.
+7. **The router costs no latency worth designing around.** 40 interleaved pairs, order
+   randomized within each pair, put the preview at a median 206.9 ms against production's
+   210.4 ms — a per-pair delta of **-5.2 ms**. The KVS read and `updateRequestOrigin()` are
+   under the noise floor.
+
+**A deleted PR stack leaves its CloudWatch log groups behind.** Lambda creates
+`/aws/lambda/<stack>-*` on first invoke, so CloudFormation never owns it and never deletes it;
+55 survive today, all with no retention, and the sweeper does not know about log groups.
+Nothing measurable is billed. The fix is an explicit `logGroup` with `RemovalPolicy.DESTROY` on
+each function — which **cannot deploy over an existing group**, so the orphans have to be
+deleted first.
 
 The origin side — OAC, the invoke permissions, the POST payload hash, and the order a
 distribution has to be deleted in — is `.claude/rules/cloudfront-origins.md`.

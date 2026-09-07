@@ -47,6 +47,13 @@ to the KVS. The distribution and router side is `.claude/rules/cdk.md`.
   `Neither CRT nor JS SigV4a implementation is available`, taking the whole PR stack down.
   `src/handlers/preview-resources.ts` carries the import with a comment saying it is not
   unused; the package declares `sideEffects: true`, so esbuild keeps it.
+- **Propagation to the edge is asymmetric, and the create side is slow.** A *new* preview
+  hostname takes a median of **29.0 s** to start resolving at one PoP (range 14.3-29.4, 7
+  samples); a hostname that PoP has already seen re-propagates in ~1.4 s, so the cost tracks
+  the novelty of the key, not the write. Deleting is ~**46 ms** at the same PoP (median of 7,
+  range 42-47). None of that contradicts the ~1 minute a *teardown* takes to look gone from
+  outside: that is the last edge to catch up, this is the nearest one. `pr-preview.yml` polls
+  for 5 minutes, so ~10x headroom — do not shorten it on the strength of one fast sample.
 - Calling the KVS API needs SigV4A for the other reason too: a CI runner using the *global*
   STS endpoint gets a v1 token that fails. That is why the writer is a Lambda-backed custom
   resource and not a step in a workflow.

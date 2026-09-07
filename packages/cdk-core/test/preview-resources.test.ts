@@ -209,6 +209,62 @@ describe('applyKvsRoute', () => {
     expect(ms).toBeGreaterThanOrEqual(100)
     expect(ms).toBeLessThan(500)
   })
+
+  it('logs nothing on a first-attempt success', async () => {
+    const store = fakeStore()
+    const log = vi.fn()
+
+    await applyKvsRoute(
+      store,
+      { operation: 'put', kvsArn: KVS_ARN, key: 'k', value: 'v' },
+      { sleep: noSleep, log },
+    )
+
+    expect(log).not.toHaveBeenCalled()
+  })
+
+  it('logs exactly two lines for a write that fails once with ValidationException then succeeds', async () => {
+    const describe = vi.fn(async () => ({ etag: 'etag-x' }))
+    const updateKeys = vi
+      .fn()
+      .mockRejectedValueOnce(validationError())
+      .mockResolvedValueOnce(undefined)
+    const store = fakeStore({ describe, updateKeys })
+    const log = vi.fn()
+
+    await applyKvsRoute(
+      store,
+      { operation: 'put', kvsArn: KVS_ARN, key: 'k', value: 'v' },
+      { sleep: noSleep, log },
+    )
+
+    expect(log).toHaveBeenCalledTimes(2)
+    expect(log.mock.calls[0]?.[0]).toContain('k')
+    expect(log.mock.calls[0]?.[0]).toContain('ValidationException')
+    expect(log.mock.calls[0]?.[0]).toContain('attempt=1')
+    expect(log.mock.calls[1]?.[0]).toContain('attempt 2')
+  })
+
+  it('uses the injected log instead of console.warn when given', async () => {
+    const describe = vi.fn(async () => ({ etag: 'etag-x' }))
+    const updateKeys = vi
+      .fn()
+      .mockRejectedValueOnce(conflictError())
+      .mockResolvedValueOnce(undefined)
+    const store = fakeStore({ describe, updateKeys })
+    const log = vi.fn()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    await applyKvsRoute(
+      store,
+      { operation: 'put', kvsArn: KVS_ARN, key: 'k', value: 'v' },
+      { sleep: noSleep, log },
+    )
+
+    expect(log).toHaveBeenCalled()
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
 })
 
 const USER_POOL_ID = 'us-east-1_TestPool'

@@ -33,7 +33,7 @@ const TEMPLATES_DIR = `${REPO_ROOT}plugins/cdk-core/skills/new-site/templates/wo
 const APP_TS_TEMPLATE = `${REPO_ROOT}plugins/cdk-core/skills/new-site/templates/app.ts`
 const APP_TS_REAL = `${REPO_ROOT}infra/bin/app.ts`
 
-const WORKFLOW_NAMES = ['deploy', 'pr-preview', 'pr-teardown', 'cleanup']
+const WORKFLOW_NAMES = ['deploy', 'pr-preview', 'pr-teardown', 'cleanup', 'publish']
 
 // Longest-first: a shorter placeholder's value must never be a substring
 // match inside a longer one's.
@@ -71,14 +71,16 @@ function render(template: string, substitutions: ReadonlyArray<readonly [string,
 }
 
 describe('workflow templates', () => {
-  it('list the same four workflows as .github/workflows/', () => {
+  it('list the same workflows as .github/workflows/', () => {
     // `.github/workflows/` also holds ci.yml, which is deliberately out of
-    // scope here: it never touches AWS and so never gets a template. Every
-    // workflow that does touch AWS requests `id-token: write` to assume the
-    // deploy role, so that's what distinguishes "the AWS-touching workflow
-    // set" from the directory listing as a whole — a fifth AWS workflow
-    // added later, with the same permission, fails this test until a
-    // template exists for it.
+    // scope here: it never authenticates to anything by OIDC and so never
+    // gets a template. `id-token: write` is what distinguishes "the
+    // OIDC-authenticating workflow set" from the directory listing as a
+    // whole — most of these workflows request it to assume the AWS deploy
+    // role, but `publish.yml` requests the same permission for npm's
+    // trusted-publishing OIDC exchange and touches no AWS at all. A new
+    // workflow added later with either kind of OIDC use fails this test
+    // until a template exists for it.
     const workflowFiles = readdirSync(WORKFLOWS_DIR)
       .filter((name) => name.endsWith('.yml'))
       .filter((name) => readFileSync(`${WORKFLOWS_DIR}/${name}`, 'utf8').includes('id-token: write'))

@@ -8,7 +8,8 @@
     }
   },
   "enabledPlugins": {
-    "cdk-core@tylerschloesser": true
+    "cdk-core@tylerschloesser": true,
+    "epochs@tylerschloesser": true
   },
   "permissions": {
     "allow": [

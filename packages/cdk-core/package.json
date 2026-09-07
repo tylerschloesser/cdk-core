@@ -1,6 +1,6 @@
 {
   "name": "@tylerschloesser/cdk-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CDK constructs for PR-previewed, Google-authed personal sites",
   "license": "MIT",
   "author": "Tyler Schloesser",

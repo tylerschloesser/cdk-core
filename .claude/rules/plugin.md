@@ -16,23 +16,29 @@ templates specifically are also `.claude/rules/workflows.md`; publishing the npm
 ## Shape
 
 ```
-.claude-plugin/marketplace.json          marketplace `tylerschloesser`, one plugin
+.claude-plugin/marketplace.json          marketplace `tylerschloesser`, two plugins
 plugins/cdk-core/.claude-plugin/plugin.json
 plugins/cdk-core/agents/{implementer,verifier}.md
 plugins/cdk-core/skills/{preview,preview-auth,new-site}/SKILL.md
 plugins/cdk-core/skills/new-site/templates/  app.ts  cdk.json  infra-package.json  workflows/
+plugins/epochs/.claude-plugin/plugin.json
+plugins/epochs/skills/{epoch,handoff}/SKILL.md
 ```
 
-`.claude/skills/{epoch,handoff}` stay **outside** the plugin: they are the session mechanism
-for this repo, not something a consumer wants. `.claude/settings.json` enables the plugin from
-this repo's own checkout (`"source": {"source": "directory", "path": "."}`), so the repo
-dogfoods it; a consumer uses `{"source": "github", "repo": "tylerschloesser/cdk-core"}`.
-`enabledPlugins` keys are `cdk-core@tylerschloesser` — `plugin@marketplace`.
+`.claude/skills/{epoch,handoff}` are the session mechanism this repo actually runs: they carry
+this repo's AWS specifics (profile, region, the account's other tenants). `plugins/epochs`
+ships generalized copies of the same two skills for other repos to install. The two are
+deliberately not byte copies, for the same reason the agent copies under `plugins/cdk-core`
+are not (see finding 4 below). `.claude/settings.json` enables both plugins from this repo's
+own checkout (`"source": {"source": "directory", "path": "."}`), so the repo dogfoods them; a
+consumer uses `{"source": "github", "repo": "tylerschloesser/cdk-core"}`. `enabledPlugins` keys
+are `cdk-core@tylerschloesser` and `epochs@tylerschloesser` — `plugin@marketplace`.
 
-Validate both manifests before committing:
+Validate every manifest before committing:
 
 ```
 claude plugin validate ./plugins/cdk-core
+claude plugin validate ./plugins/epochs
 claude plugin validate ./.claude-plugin/marketplace.json
 ```
 
