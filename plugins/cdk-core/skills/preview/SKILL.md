@@ -27,6 +27,21 @@ at the `cdk deploy` step, a repeat deploy to an existing PR stack ~29-33 s, and 
 minutes for a preview is normal. If you are still waiting at 5 minutes, something is wrong —
 go read logs, don't keep polling.
 
+## Opening the PR is part of the task
+
+"Verify it in a preview" means: make the change, open the PR, wait for the preview, check it.
+Do not stop after committing to ask whether to push — the push *is* the verification, and
+there is nothing to verify without it.
+
+That is a judgement about this specific action, not a general licence. Deploying a PR preview
+is routine, self-cleaning and cheap: `pr-teardown.yml` deletes the stack when the PR closes,
+the daily sweeper catches whatever teardown missed, and the deploy role's IAM cannot touch
+anything outside `<Prefix>-pr-*`. The idle cost of a live preview is pennies.
+
+What does deserve a question first, every time: deleting or destroying any stack (see the last
+section), deploying to production, publishing a package, force-pushing, closing someone else's
+PR, or anything touching the prod user pool.
+
 ## Opening a PR and waiting for its preview
 
 ```
@@ -45,8 +60,19 @@ scripts/verify-preview.sh <n>
 This is pure `curl` (plus `python3` for JSON/timing checks) — no AWS credentials needed. It
 checks: assets serve at `GET /`, the SPA fallback serves the same `index.html` for a deep
 client route, `/__config.json` reports `mode: preview` and the right `pr`, `/api/ping`
-answers, a signed `POST /api/echo` round-trips, `/events/tick?n=5` streams five events with
-real inter-arrival spread (not buffered), and an unrelated PR number 404s.
+answers, a signed `POST /api/echo` round-trips, `/events/tick?n=5` refuses an unauthenticated
+request with **401**, and an unrelated PR number 404s.
+
+To actually stream the events rather than just prove they are protected, pass a token — this
+is the one part that needs AWS credentials, and it lives outside the script for that reason:
+
+```
+scripts/verify-preview.sh <n> --id-token "$(scripts/preview-login.sh <n>)"
+```
+
+That form checks five `event: tick` frames arrive with real inter-arrival spread (about
+2000 ms across five, 500 ms between the first two) rather than buffered into one write. See
+the `preview-auth` skill for where the token comes from.
 
 Then run the e2e suite against the preview:
 
