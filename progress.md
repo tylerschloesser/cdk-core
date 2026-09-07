@@ -1317,9 +1317,21 @@ The stacks' *own* keys and prefixes are removed by their stack deletes, which is
   it shipped this epoch but went in *after* the race, so it has never run against a real
   conflict. The next epoch that deploys two PR stacks at once should grep the two
   `DeploymentPreviewResourcesHandler` log groups for `applyKvsRoute:`.
-- **Trusted publishing is unproven end to end.** The workflow, the template and the tag guard
-  are committed and `actionlint`-clean, but nothing has published through it. It needs the
-  npmjs.com trusted-publisher entry (a human action, below) and then a `v0.1.1` tag.
+- **Trusted publishing works up to the registry, and 0.1.1 is NOT live.** The `v0.1.1` tag ran
+  `publish.yml` to a green finish: the OIDC exchange returned 200 for
+  `audience=npm:registry.npmjs.org`, the tag guard passed, `consumer-smoke.sh --pack` passed in
+  CI, and pnpm printed `✅ Published package @tylerschloesser/cdk-core@0.1.1`. The registry
+  disagrees — `https://registry.npmjs.org/@tylerschloesser/cdk-core/0.1.1` is **404** and
+  `dist-tags.latest` is still `0.1.0`, checked against the raw packument, not the npm CLI's
+  cache. The likely cause is npm **staged publishing**: a trusted publisher can be configured
+  stage-only, in which case the version is accepted and held hidden until a maintainer approves
+  it. Approval is deliberately impossible over OIDC — `npm stage approve` requires proof of
+  presence — so no workflow can finish this. Check with `npm stage list
+  @tylerschloesser/cdk-core`; if 0.1.1 is queued, `npm stage approve
+  @tylerschloesser/cdk-core@0.1.1` promotes it. If it is *not* queued, then pnpm's success
+  message is wrong about something else and the publish path is not yet trustworthy.
+  **`v0.1.1` is tagged and `package.json` says 0.1.1, so the version number is spent either
+  way** — a re-publish attempt has to go to 0.1.2.
 - **Teardown leaves 55 orphaned CloudWatch log groups.** `/aws/lambda/CdkCore-pr-*` survives
   its stack because Lambda, not CloudFormation, creates the group; all 55 have
   `retentionInDays: null` (never expire). `describe-log-groups` reports `storedBytes: 0` for
@@ -1384,16 +1396,23 @@ branch was force-deleted.
 - The repo is still **public**, and the confirmation asked for after Epoch 1 is still
   outstanding. This epoch added no new account detail to tracked files.
 
-**Human action owed — one, and it blocks the publish:** add the trusted publisher on
-npmjs.com for `@tylerschloesser/cdk-core` (Settings → Trusted publishers → GitHub Actions):
-organization/user `tylerschloesser`, repository `cdk-core`, workflow filename **`publish.yml`**,
-environment blank. The filename is the key npm matches on — renaming the workflow later
-breaks publishing with no error on this side.
+**Human action owed — one, and it is the last thing standing between 0.1.1 and npm:** run
+`npm stage list @tylerschloesser/cdk-core` and, if 0.1.1 is queued, `npm stage approve
+@tylerschloesser/cdk-core@0.1.1`. It needs a real TTY and a 2FA prompt by design; OIDC cannot
+do it, which is the entire point of staged publishing. The trusted publisher itself is already
+configured (organization `tylerschloesser`, repository `cdk-core`, workflow filename
+**`publish.yml`**) — npm matches on the filename, so renaming that workflow breaks publishing
+with no error on this side. If the publisher's allowed action is stage-only and that is not
+what was wanted, switching it to plain `npm publish` makes the next tag go straight out.
 
 ### The merge
 
-Epoch 6 is **PR #10**, with `CI` and `PR Preview` both green (preview deployed in 29 s,
-push → sticky comment 85 s, e2e passed). Not yet merged at the time this entry was written.
+Epoch 6 merged as **PR #10** (`cafb93d`), squashed, with `CI` and `PR Preview` green on the
+final commit. `deploy.yml` was green on the merge and production answers `{"message":"pong"}`;
+`pr-teardown.yml` removed `CdkCore-pr-10`, so **no PR stack is alive**. `publish.yml` was then
+dispatched with `dry_run: true` (green: verify and pack ran, publish skipped as designed) and
+the `v0.1.1` tag was pushed, whose run is green but has not put 0.1.1 on the registry — see
+*Left undone*.
 
 **PR #11 is a throwaway** and is closed, unmerged, with its branch deleted — deleting the
 branch *was* the test.

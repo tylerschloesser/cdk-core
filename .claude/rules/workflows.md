@@ -51,6 +51,23 @@ the sweep exits non-zero. That is pnpm's error reporting, not the sweeper; `node
 packages/cdk-core/dist/bin/sweep.js sweep ...` is clean. Nobody saw it for three epochs because
 every live run printed `(nothing to reconcile)` and exited 0.
 
+## A green publish run is not a published version
+
+`v0.1.1` ran `publish.yml` to success — OIDC exchange 200, tag guard passed,
+`consumer-smoke.sh --pack` passed, `✅ Published package @tylerschloesser/cdk-core@0.1.1` — and
+the registry 404s for that version. npm **staged publishing** is the likely reason: a trusted
+publisher can be configured stage-only, which accepts the version and holds it hidden until a
+maintainer runs `npm stage approve`. That approval requires proof of presence, so **no workflow
+can ever complete a stage-only publish**, and no amount of CI green will tell you.
+
+Always confirm the tarball landed before believing a publish:
+
+```
+curl -fsS https://registry.npmjs.org/<pkg>/<version> > /dev/null && echo live
+```
+
+The version number is spent either way — a retry has to bump.
+
 ## The things that bit
 
 1. **The deploy role trusts `ref:refs/heads/main` and `pull_request`, and nothing else.** A
