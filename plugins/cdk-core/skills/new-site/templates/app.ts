@@ -3,13 +3,13 @@
  *
  * Stack *knowledge* — which domain, which zone, which account, how many
  * Lambdas, how they're bundled — lives here and nowhere inside
- * `@tylerschloesser/cdk-core`. `defineSiteStacks()` composes the five stacks
+ * `{{PACKAGE_NAME}}`. `defineSiteStacks()` composes the five stacks
  * out of the same constructs a consumer could wire by hand
  * (`siteCertificate`, `Site`, `PreviewSite`, `PreviewDeployment`,
  * `GithubDeployRole`); it removes the boilerplate, not the choices. A site
  * that needs a shape it cannot express drops back to the constructs.
  *
- * `CdkCore-pr-<n>` takes no construct reference to `CdkCorePreview` — it
+ * `{{STACK_PREFIX}}-pr-<n>` takes no construct reference to `{{STACK_PREFIX}}Preview` — it
  * reads the shared preview infrastructure (distribution ARN, KVS ARN, bucket
  * name, the pool) from the SSM parameters `PreviewSite` publishes. That is
  * what lets it deploy with `--exclusively`, without touching the shared
@@ -21,7 +21,7 @@ import { App, Duration } from 'aws-cdk-lib'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs'
 import type { Construct } from 'constructs'
-import { defineSiteStacks } from '@tylerschloesser/cdk-core'
+import { defineSiteStacks } from '{{PACKAGE_NAME}}'
 
 const API_ENTRY = fileURLToPath(new URL('../../apps/api/src/lambda-api.ts', import.meta.url))
 const EVENTS_ENTRY = fileURLToPath(new URL('../../apps/api/src/lambda-events.ts', import.meta.url))
@@ -61,10 +61,10 @@ function backendFunctions(scope: Construct): Record<string, lambda.Function> {
 }
 
 defineSiteStacks(new App(), {
-  env: { account: '063257577013', region: 'us-east-1' },
-  stackPrefix: 'CdkCore',
-  domain: 'cdk-core.ty.ler.dev',
-  zone: { hostedZoneId: 'Z038502736IM0QLQT7VFN', zoneName: 'ty.ler.dev' },
+  env: { account: '{{ACCOUNT_ID}}', region: '{{REGION}}' },
+  stackPrefix: '{{STACK_PREFIX}}',
+  domain: '{{SITE_DOMAIN}}',
+  zone: { hostedZoneId: '{{ZONE_ID}}', zoneName: '{{ZONE_NAME}}' },
   webDist: WEB_DIST,
   // The routing half of the backends contract, shared by both distributions.
   // A CloudFront Function cannot change which cache behavior was selected, so
@@ -77,17 +77,17 @@ defineSiteStacks(new App(), {
   functions: backendFunctions,
   // Both prefixes are written out rather than derived, because they also exist
   // in a place CDK cannot reach: the Google OAuth client's authorized redirect
-  // URIs (`https://<prefix>.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`).
+  // URIs (`https://<prefix>.auth.{{REGION}}.amazoncognito.com/oauth2/idpresponse`).
   // A mismatch is a `redirect_uri_mismatch` at Google with nothing in any AWS log.
-  auth: { domainPrefix: 'cdk-core', preview: { domainPrefix: 'cdk-core-preview' } },
+  auth: { domainPrefix: '{{AUTH_PREFIX}}', preview: { domainPrefix: '{{PREVIEW_AUTH_PREFIX}}' } },
   // Deployed by hand, once, and never by a workflow: this is the stack that
   // grants CI its credentials. The numeric ids are GitHub's own, from
   // `gh api repos/<repo>`, and exist only to build the immutable `sub` claim
   // the trust policy also accepts alongside the legacy `owner/name` form.
   github: {
-    repo: 'tylerschloesser/cdk-core',
-    roleName: 'cdk-core-github-deploy',
-    ownerId: '2300885',
-    repoId: '1359473287',
+    repo: '{{REPO}}',
+    roleName: '{{ROLE_NAME}}',
+    ownerId: '{{REPO_OWNER_ID}}',
+    repoId: '{{REPO_ID}}',
   },
 })

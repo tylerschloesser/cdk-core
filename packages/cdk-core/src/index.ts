@@ -6,10 +6,11 @@
  * `PreviewDeployment` (one per PR, in the PR stack). See `plan.md` →
  * Construct API for the reasoning behind each default.
  *
- * As of Epoch 3 every construct is real: `siteCertificate`, `Site`,
- * `PreviewSite`, `PreviewDeployment` and `GithubDeployRole` all build
- * resources. The `auth` props on all of them are accepted but ignored with a
- * synth-time warning until Epoch 4.
+ * Every construct here builds real resources, `auth` included (Epoch 4).
+ * `defineSiteStacks()` (Epoch 5) is the one non-construct export: it composes
+ * all five of them into the four-stack layout a consumer would otherwise write
+ * out by hand. The constructs stay primary — the convenience is built on them,
+ * not the other way round.
  */
 
 export type { SiteConfig, SiteAuthConfig } from './config.js'
@@ -30,6 +31,13 @@ export type { RouterSourceProps } from './router/render.js'
 
 export { Site } from './site.js'
 export type { SiteProps } from './site.js'
+
+export { defineSiteStacks } from './define-site-stacks.js'
+export type {
+  DefineSiteStacksProps,
+  SiteStacks,
+  BackendFunctions,
+} from './define-site-stacks.js'
 
 export { GithubDeployRole } from './github-deploy-role.js'
 export type { GithubDeployRoleProps } from './github-deploy-role.js'
