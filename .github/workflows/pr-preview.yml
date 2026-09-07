@@ -13,6 +13,11 @@
 # anyone watching). `date +%s` around the deploy step and from job start to
 # the comment gives deploy time and push-to-comment latency without adding a
 # dependency.
+#
+# The QR under the timings is a hosted image from api.qrserver.com: GitHub
+# strips `data:` URIs and inline <svg> from comments, so a hosted image is the
+# only form that renders as an image — and camo caches it, so an existing
+# comment survives the service going away.
 
 name: PR Preview
 
@@ -124,5 +129,7 @@ jobs:
           - URL: https://pr-$PR.preview.cdk-core.ty.ler.dev
           - Commit: ${{ github.event.pull_request.head.sha }}
           - deploy ${DEPLOY_SECONDS} s · push → comment ${TOTAL} s
+
+          ![Scan to open the preview](https://api.qrserver.com/v1/create-qr-code/?size=180x180&qzone=2&data=https%3A%2F%2Fpr-$PR.preview.cdk-core.ty.ler.dev)
           EOF
           )"
