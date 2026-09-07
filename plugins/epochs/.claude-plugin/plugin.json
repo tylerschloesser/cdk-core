@@ -1,0 +1,12 @@
+{
+  "name": "epochs",
+  "description": "Run a long project as one epoch per session against a plan file, with a handoff that corrects the plan in place.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Tyler Schloesser"
+  },
+  "homepage": "https://github.com/tylerschloesser/cdk-core",
+  "repository": "https://github.com/tylerschloesser/cdk-core",
+  "license": "MIT",
+  "keywords": ["planning", "skills", "workflow"]
+}
