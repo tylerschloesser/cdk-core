@@ -12,6 +12,7 @@ import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import type * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
 import type * as cognito from 'aws-cdk-lib/aws-cognito'
 import type * as route53 from 'aws-cdk-lib/aws-route53'
+import type { Construct } from 'constructs'
 
 /** Where the site lives. Everything is derived from these two values. */
 export interface SiteDomain {
@@ -33,8 +34,13 @@ export interface BackendProps {
   readonly streaming?: boolean
   /** Origin read timeout. Default 30s, or 60s when streaming. Max 120s without a quota increase. */
   readonly readTimeout?: Duration
-  /** Default `CachePolicy.CACHING_DISABLED`. Ignored in previews, which are always disabled. */
-  readonly cachePolicy?: cloudfront.ICachePolicy
+  /**
+   * Default `CACHING_DISABLED`. Accepts a construct, or a factory that `Site`
+   * calls once per backend with the `Site` construct as scope — the form
+   * `defineSiteStacks` consumers need, because `backends` is built before any
+   * stack exists. Ignored in previews, which are always `CACHING_DISABLED`.
+   */
+  readonly cachePolicy?: cloudfront.ICachePolicy | ((scope: Construct) => cloudfront.ICachePolicy)
   /** Default `AllowedMethods.ALLOW_ALL`. */
   readonly allowedMethods?: cloudfront.AllowedMethods
   /** Escape hatch: merged last into the behavior. Cannot replace `origin` or `functionAssociations`. */

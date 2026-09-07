@@ -6,7 +6,7 @@ move consists of, what will fight you, and what each repo has to decide. It does
 an order of commits — that is the plan the session writes.
 
 Written 2026-09-07 against `@tylerschloesser/cdk-core@0.1.1` and the state of both repos on that
-date. Everything below was read from the repos or the account, not assumed. Where a claim is
+date, and amended the same day for 0.1.2 (hazard 6, the `cachePolicy` factory). Everything below was read from the repos or the account, not assumed. Where a claim is
 inferred rather than measured, it says so.
 
 The reference implementation of everything here is `cdk-core.ty.ler.dev` — this repo's own
@@ -163,13 +163,24 @@ stack scope, so the worker can be *created* inside it, wired, granted and refere
 request Lambda's environment — it simply must not be **returned**. Only routed backends go in
 the returned record.
 
-### 6. Both sites currently manage their Lambda log groups; cdk-core does not
+### 6. Lambda log groups: the sweeper reclaims them from 0.1.2, and a consumer may still own them
 
-Thai and yahn both create explicit `AWS::Logs::LogGroup` resources in their site stacks. cdk-core
-does not, so Lambda creates them implicitly and nothing ever deletes them — that is **issue
-#12**, ~5 orphaned never-expiring groups per PR stack. Migrating as things stand is a small
-regression against what both repos already do correctly. Check #12's state before planning; if
-it is fixed, pin a version that includes the fix.
+Thai and yahn both create explicit `AWS::Logs::LogGroup` resources in their site stacks. cdk-core's
+constructs do not, so Lambda creates a PR stack's groups implicitly on first invoke and
+CloudFormation never owns them. **Issue #12 is fixed sweeper-side in 0.1.2**: `cdk-core sweep`
+has a fourth step that deletes `^/aws/lambda/<prefix>-pr-([0-9]+)-` groups whose PR is closed,
+and `GithubDeployRole` grants `logs:DescribeLogGroups` (on `*`) and `logs:DeleteLogGroup` scoped
+to `log-group:/aws/lambda/<prefix>-pr-*`. Pin `^0.1.2` or later.
+
+A migrating site may *also* keep declaring explicit groups inside its `functions` factory —
+`logGroup` on each `NodejsFunction`, with `RemovalPolicy.RETAIN` and a long retention in the
+prod stack and `DESTROY` plus a week in a PR stack. That is safe on a migration precisely because
+the new stacks are fresh: there is no pre-existing implicit group for the explicit one to
+collide with, which is the case that keeps the package from doing it for every consumer. Yahn
+does this (its factory reads `Stack.of(scope).stackName` to tell prod from a PR); a site that
+does not still gets its PR groups reclaimed by the sweeper. Note that yahn's *old* stacks
+already leaked twenty `/aws/lambda/YahnAppStack-*` groups from previews, so the pre-migration
+baseline was never as clean as this hazard first assumed.
 
 ### 7. `cdk.context.json` becomes required, and can go stale
 
@@ -299,9 +310,13 @@ minute after the stack delete completes.
 
 ## Open in cdk-core that affects a migration
 
-- **#12, log groups** — hazard 6. Both repos currently do better than the package here.
+- **#12, log groups** — fixed in 0.1.2, sweeper-side; hazard 6 says what a consumer may still do.
 - The KVS retry path has never been observed retrying under a real conflict.
-- `CachePolicies.originDecides` has never been used by anything. Yahn's `/api/*` is cached today
-  with a 300 s max TTL, so its migration is the first real consumer of that policy.
+- `CachePolicies.originDecides` had never been used by anything before yahn, and the first attempt
+  found the gap: `BackendProps.cachePolicy` took an `ICachePolicy` construct, but
+  `defineSiteStacks`'s `backends` record is built before any stack exists, so there was no scope
+  to build one in. **0.1.2 accepts a factory** — `cachePolicy: (scope) => CachePolicies.originDecides(scope)`
+  — which `Site` calls once per backend with itself as scope and `PreviewSite` ignores. Yahn's
+  `/api/*` is cached with a 300 s max TTL and is the first real consumer of that policy.
 - The refresh path has never refreshed a real Cognito token, and `logout()` is local-only —
   relevant only if auth is in scope.

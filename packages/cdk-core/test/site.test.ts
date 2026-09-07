@@ -10,6 +10,7 @@ import * as path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { CachePolicies } from '../src/cache-policies.js'
+import { backendBehavior } from '../src/behaviors.js'
 import { Site } from '../src/site.js'
 
 /**
@@ -434,5 +435,16 @@ describe('CachePolicies.originDecides', () => {
         },
       },
     })
+  })
+})
+
+describe('backendBehavior', () => {
+  it('throws when cachePolicy is a factory and no scope is available to resolve it', () => {
+    expect(() =>
+      backendBehavior(
+        { pathPattern: '/x/*', cachePolicy: () => ({ cachePolicyId: 'p' }) as cloudfront.ICachePolicy },
+        { origin: {} as cloudfront.IOrigin },
+      ),
+    ).toThrow(/resolve it with a scope/)
   })
 })

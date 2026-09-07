@@ -25,6 +25,7 @@ import {
   type DefineSiteStacksProps,
   type SiteStacks,
 } from '../src/define-site-stacks.js'
+import { CachePolicies } from '../src/cache-policies.js'
 
 const DOMAIN = 'cdk-core.ty.ler.dev'
 
@@ -129,6 +130,12 @@ function scenario(
   const value = { app, result, templates }
   scenarios.set(name, value)
   return value
+}
+
+function distribution(template: Template): Record<string, unknown> {
+  const resources = template.findResources('AWS::CloudFront::Distribution')
+  const only = Object.values(resources)[0] as { Properties: { DistributionConfig: Record<string, unknown> } }
+  return only.Properties.DistributionConfig
 }
 
 /** The `AWS::Lambda::Url` resource whose target is the function created with id `<prefix>Fn`. */
@@ -383,6 +390,43 @@ describe('defineSiteStacks', () => {
       ) as { Properties: { PolicyDocument: { Statement: { Resource: unknown }[] } } }[]
       const resources = JSON.stringify(policies.map((p) => p.Properties.PolicyDocument.Statement))
       expect(resources).toContain('dummy-value-for-')
+    })
+  })
+
+  describe('a cachePolicy factory', () => {
+    it('resolves a cachePolicy factory in the Site stack and ignores it in the preview', () => {
+      // A different `backends` shape than `BACKENDS`, so this is built
+      // directly rather than through the `scenario()` cache keyed by name —
+      // reusing 'base' or 'full' here would synth the wrong backends.
+      const app = new App()
+      const result = defineSiteStacks(
+        app,
+        baseProps({
+          backends: {
+            api: { pathPattern: '/api/*', cachePolicy: (scope) => CachePolicies.originDecides(scope) },
+            events: { pathPattern: '/events/*', streaming: true },
+          },
+        }),
+      )
+
+      const siteTemplate = Template.fromStack(result.site)
+      const sitePolicies = siteTemplate.findResources('AWS::CloudFront::CachePolicy')
+      const sitePolicyIds = Object.keys(sitePolicies)
+      expect(sitePolicyIds).toHaveLength(1)
+      const config = distribution(siteTemplate) as {
+        CacheBehaviors: { PathPattern: string; CachePolicyId: unknown }[]
+      }
+      const api = config.CacheBehaviors.find((b) => b.PathPattern === '/api/*')
+      expect(api?.CachePolicyId).toEqual({ Ref: sitePolicyIds[0] })
+
+      const previewTemplate = Template.fromStack(result.preview)
+      expect(Object.keys(previewTemplate.findResources('AWS::CloudFront::CachePolicy'))).toHaveLength(0)
+      const previewConfig = distribution(previewTemplate) as {
+        CacheBehaviors: { PathPattern: string; CachePolicyId: unknown }[]
+      }
+      for (const behavior of previewConfig.CacheBehaviors) {
+        expect(behavior.CachePolicyId).toBe('4135ea2d-6df8-44a3-9df3-4b5a84be39ad')
+      }
     })
   })
 })

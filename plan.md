@@ -834,8 +834,8 @@ export interface BackendProps {
   readonly streaming?: boolean
   /** Origin read timeout. Default 30s, or 60s when streaming. Max 120s without a quota increase. */
   readonly readTimeout?: Duration
-  /** Default CachePolicy.CACHING_DISABLED. Ignored in previews (always disabled). */
-  readonly cachePolicy?: cloudfront.ICachePolicy
+  /** Default CACHING_DISABLED. Accepts a construct, or a factory Site calls once per backend with itself as scope. Ignored in previews (always disabled). */
+  readonly cachePolicy?: cloudfront.ICachePolicy | ((scope: Construct) => cloudfront.ICachePolicy)
   /** Default ALLOW_ALL. */
   readonly allowedMethods?: cloudfront.AllowedMethods
   /** Escape hatch: merged last into the behavior. Cannot replace `origin` or `functionAssociations`. */

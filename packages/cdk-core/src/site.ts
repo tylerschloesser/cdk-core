@@ -152,11 +152,20 @@ export class Site extends Construct {
           `Site: two backends share the path pattern ${JSON.stringify(backend.pathPattern)}`,
         )
       }
-      backendBehaviors[backend.pathPattern] = backendBehavior(backend, {
-        origin: origins.FunctionUrlOrigin.withOriginAccessControl(backend.functionUrl, {
-          readTimeout: Duration.seconds(backendReadTimeoutSeconds(key, backend)),
-        }),
-      })
+      // Resolve a cachePolicy factory once per backend, with `this` (the
+      // `Site` construct) as scope. Two backends sharing one factory would
+      // collide on the default construct id, so a consumer passing a factory
+      // to two backends must give it distinct ids itself.
+      const resolvedCachePolicy =
+        typeof backend.cachePolicy === 'function' ? backend.cachePolicy(this) : backend.cachePolicy
+      backendBehaviors[backend.pathPattern] = backendBehavior(
+        { ...backend, cachePolicy: resolvedCachePolicy },
+        {
+          origin: origins.FunctionUrlOrigin.withOriginAccessControl(backend.functionUrl, {
+            readTimeout: Duration.seconds(backendReadTimeoutSeconds(key, backend)),
+          }),
+        },
+      )
     }
 
     for (const pattern of Object.keys(props.additionalBehaviors ?? {})) {

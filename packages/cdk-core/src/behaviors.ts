@@ -34,12 +34,18 @@ export function backendBehavior(
   backend: BackendProps,
   context: BackendBehaviorContext,
 ): cloudfront.BehaviorOptions {
+  if (typeof backend.cachePolicy === 'function' && !context.forceCachingDisabled) {
+    throw new Error(
+      'backendBehavior: cachePolicy is a factory; resolve it with a scope first (Site does this)',
+    )
+  }
   return {
     viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
     allowedMethods: backend.allowedMethods ?? cloudfront.AllowedMethods.ALLOW_ALL,
     cachePolicy: context.forceCachingDisabled
       ? cloudfront.CachePolicy.CACHING_DISABLED
-      : (backend.cachePolicy ?? cloudfront.CachePolicy.CACHING_DISABLED),
+      : ((backend.cachePolicy as cloudfront.ICachePolicy | undefined) ??
+        cloudfront.CachePolicy.CACHING_DISABLED),
     // Must exclude `host` and only `host` — see the module comment.
     originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     // Compression would defeat SSE. Off for every backend, not just the
