@@ -149,12 +149,12 @@ This repo's own `.claude/settings.json` carries the same two keys but with `"sou
 of fetching itself over the network. A separate consumer repo needs the GitHub form above.
 
 **The skills appear one session late.** The first session started after the setting lands
-registers the marketplace (it shows up in `~/.claude/plugins/known_marketplaces.json`) but does
-not yet expose the plugin's skills; the *next* session does. Measured in Epoch 5, in both the
-`directory` and the relative-`"."` forms. So a first run that cannot see `preview` or
-`new-site` is not a broken manifest — start a second session before debugging anything.
-`claude plugin marketplace list` does not show a marketplace registered this way either; the
-`known_marketplaces.json` file is the thing to look at.
+registers the marketplace but does not yet expose the plugin's skills; the *next* session does.
+Measured in Epoch 5, in both the absolute-path and relative-`"."` directory forms. So a first
+run that cannot see `preview` or `new-site` is not a broken manifest — start a second session
+before debugging anything. `claude plugin marketplace list` tells you which half you are in: it
+does not list your marketplace until that first session has run, and does afterwards
+(`~/.claude/plugins/known_marketplaces.json` holds the same record, with the path resolved).
 
 ## 6. Verification checklist
 
