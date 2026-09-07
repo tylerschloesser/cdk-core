@@ -1,8 +1,23 @@
 {
   "name": "@tylerschloesser/cdk-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "CDK constructs for PR-previewed, Google-authed personal sites",
   "license": "MIT",
+  "author": "Tyler Schloesser",
+  "homepage": "https://github.com/tylerschloesser/cdk-core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerschloesser/cdk-core.git",
+    "directory": "packages/cdk-core"
+  },
+  "bugs": "https://github.com/tylerschloesser/cdk-core/issues",
+  "keywords": ["aws-cdk", "cloudfront", "preview-environments", "cognito", "sse"],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "//": "The subpath exports are the contract every consumer and every later epoch builds on. `.` is CDK-only (synth time, needs aws-cdk-lib); `./auth/browser` is DOM-only; `./auth/server` is Node-only. Keeping them apart is what lets a browser bundle import auth without pulling in aws-cdk-lib.",
   "exports": {

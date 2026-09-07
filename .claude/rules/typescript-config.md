@@ -17,6 +17,15 @@ Every dependency version is in the `catalog:` block of `pnpm-workspace.yaml`; ev
 says `"catalog:"`. Adding a dependency means adding a catalog entry *and* the `"catalog:"`
 reference — a literal version in a manifest is a bug, not a shortcut.
 
+**Publish with `pnpm publish` and pack with `pnpm pack`, never the `npm` forms.** npm has no
+idea what `catalog:` means: an `npm pack` tarball ships `"aws-jwt-verify": "catalog:"` in
+`dependencies` and every consumer's install dies with
+`EUNSUPPORTEDPROTOCOL: Unsupported URL Type "catalog:"`. pnpm rewrites the catalog (and
+`workspace:`) specifiers to real semver ranges as it packs. Measured in Epoch 5 by
+`scripts/consumer-smoke.sh --pack`, before 0.1.0 went out — an npm version is permanent, so
+this is a bug you only get to find once. The smoke script also asserts the installed manifest
+carries no `catalog:`/`workspace:` specifier, so the check survives someone switching tools.
+
 TypeScript is pinned to `~6.0`, not 7. `verbatimModuleSyntax` and `erasableSyntaxOnly` are on
 in `tsconfig.base.json`, so: **no `enum`, no constructor parameter properties, no `namespace`,
 no `import =`**, and every type-only import says `import type`. No formatter, no semicolons,

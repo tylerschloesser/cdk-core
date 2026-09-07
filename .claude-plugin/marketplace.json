@@ -1,0 +1,15 @@
+{
+  "name": "tylerschloesser",
+  "description": "Tyler Schloesser's Claude Code plugins. One today: cdk-core, for personal sites with per-PR CloudFront previews and Google auth on AWS.",
+  "owner": {
+    "name": "Tyler Schloesser",
+    "url": "https://github.com/tylerschloesser"
+  },
+  "plugins": [
+    {
+      "name": "cdk-core",
+      "source": "./plugins/cdk-core",
+      "description": "Drive per-PR CloudFront preview environments, Cognito machine auth, and the four-stack CDK layout that @tylerschloesser/cdk-core builds."
+    }
+  ]
+}
