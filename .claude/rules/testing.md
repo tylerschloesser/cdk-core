@@ -21,6 +21,12 @@ vitest file may open a socket, read AWS credentials, or need a build; an SSM
 `valueFromLookup` inside one resolves to CDK's `dummy-value-for-…` placeholder and that is
 fine, but nothing may *depend* on the real value.
 
+`testTimeout` is **30 s**, not vitest's 5 s default: `Template.fromStack` synthesizes the app,
+which stages and zips every `Code.fromAsset` (CDK's own provider framework included), and on a
+two-core CI runner that alone exceeded 5 s and failed a run whose assertions were all correct.
+It is a hang guard, not a budget — the suite takes ~3 s locally. A test that synthesizes the
+same stack more than once should memoise it instead of leaning on the timeout.
+
 **Playwright** (`e2e/`, run by `pnpm e2e`) covers everything that is only true when the whole
 thing is wired together. **One config, three targets** is the design and it is not negotiable:
 

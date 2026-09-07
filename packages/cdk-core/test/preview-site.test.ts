@@ -16,7 +16,22 @@ import { PreviewSite } from '../src/preview-site.js'
 
 const DOMAIN = 'cdk-core.ty.ler.dev'
 
+/**
+ * Memoised per `auth` value. Synthesizing this stack stages CDK's
+ * provider-framework asset, which is the slowest thing in the whole vitest
+ * suite; the tests below only read the template, so one synth serves them all.
+ */
+const built = new Map<boolean, { site: PreviewSite; template: Template }>()
+
 function build(auth: boolean): { site: PreviewSite; template: Template } {
+  const cached = built.get(auth)
+  if (cached) return cached
+  const result = synth(auth)
+  built.set(auth, result)
+  return result
+}
+
+function synth(auth: boolean): { site: PreviewSite; template: Template } {
   const app = new App()
   const stack = new Stack(app, 'Preview', {
     env: { account: '111122223333', region: 'us-east-1' },
