@@ -1,4 +1,15 @@
 {
+  "extraKnownMarketplaces": {
+    "tylerschloesser": {
+      "source": {
+        "source": "directory",
+        "path": "."
+      }
+    }
+  },
+  "enabledPlugins": {
+    "cdk-core@tylerschloesser": true
+  },
   "permissions": {
     "allow": [
       "Bash(pnpm install)",

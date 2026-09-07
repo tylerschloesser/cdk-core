@@ -1,7 +1,7 @@
 ---
 paths:
   - ".github/workflows/**"
-  - "plugins/cdk-core/skills/new-site/templates/**"
+  - "plugins/cdk-core/skills/new-site/templates/workflows/**"
   - "packages/cdk-core/src/github-deploy-role.ts"
   - "packages/cdk-core/src/sweep/**"
 ---
@@ -27,7 +27,7 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
   deploy for the same PR. Cancelling a job does not cancel the CloudFormation operation it
   started; the next run would hit a stack stuck `UPDATE_IN_PROGRESS`.
 - **Adding a workflow means adding a template** under
-  `plugins/cdk-core/skills/new-site/templates/`, or `test/workflow-templates.test.ts` fails.
+  `plugins/cdk-core/skills/new-site/templates/workflows/`, or `test/workflow-templates.test.ts` fails.
   It renders each template with this repo's values and asserts **byte** equality, and it pairs
   the two directories by "the workflow requests `id-token: write`" — which is what
   distinguishes an AWS-touching workflow from `ci.yml`.

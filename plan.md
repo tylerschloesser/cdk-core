@@ -436,7 +436,8 @@ APIs with `x-id-token: <IdToken>` or seeds a browser: the app's own storage key
 ### D7. Package registry: public npm, scoped
 
 **Decision.** Publish `@tylerschloesser/cdk-core` to npmjs.org with `--access public`. Manual
-`npm publish` from a tagged commit in Epoch 5; GitHub Actions trusted publishing is a later
+`pnpm publish` from a tagged commit in Epoch 5 (**[revised, Epoch 5]** `npm publish` cannot
+work — it leaves `catalog:` specifiers unresolved in `dependencies`); GitHub Actions trusted publishing is a later
 option.
 
 **Why.** GitHub Packages needs a token with `read:packages` in every consumer's `.npmrc` and
@@ -522,7 +523,11 @@ threaded through Vite env vars or CDK context.
 | `<Prefix>-pr-<n>` | `pr-preview.yml` per PR; deleted by `pr-teardown.yml`/sweeper | `PreviewDeployment` + the PR's backend Lambdas (consumer-owned); optional data (consumer-owned, `RemovalPolicy.DESTROY`) |
 | `<Prefix>GithubOidc` | **by hand, once** | `GithubDeployRole` |
 
-Stack knowledge stays in the consumer's `bin/app.ts`; the constructs never create stacks.
+Stack knowledge stays in the consumer's `bin/app.ts`; **the constructs** never create stacks.
+**[revised, Epoch 5]** `defineSiteStacks()` does — it is a plain function, not a construct, and
+it exists because writing those five stacks out by hand measured 178 non-import lines against
+A3's target of 60. It composes the same constructs a consumer could wire themselves and returns
+every stack and construct it made, so nothing is hidden behind it.
 
 ### Request path for a preview
 
@@ -802,6 +807,37 @@ export interface GithubDeployRoleProps {
 }
 export class GithubDeployRole extends Construct { readonly role: iam.Role }
 
+// ---------- defineSiteStacks (the four-stack layout in one call) ----------
+//
+// [Epoch 5] Added because the hand-written form of the five stacks measured 178
+// non-import lines against A3's target of 60; the epoch's own instruction for that
+// case is to add the convenience and re-count, keeping the constructs primary.
+// After it, `infra/bin/app.ts` is 45. It is a **function, not a construct**, and it
+// is the only thing in the package that creates a `Stack`.
+
+export interface DefineSiteStacksProps {
+  readonly env: Environment
+  readonly stackPrefix: string            // 'CdkCore' -> CdkCore{Shared,Preview,Site,GithubOidc}, CdkCore-pr-<n>
+  readonly domain: string
+  readonly zone: route53.HostedZoneAttributes   // imported by attributes, never created
+  readonly webDist: string
+  /** Routing only; the same map feeds both distributions so they cannot disagree. */
+  readonly backends: Record<string, BackendProps>
+  /** Called once per stack that needs live Lambdas (prod, and each PR stack). Keys must match `backends`.
+   *  The function URL is added here, from that key's `streaming` flag: AWS_IAM always, RESPONSE_STREAM when streaming. */
+  readonly functions: (scope: Construct) => Record<string, lambda.Function>
+  /** `preview` is merged over the shared props for the preview pool only. */
+  readonly auth?: AuthProps & { readonly preview?: AuthProps }
+  /** Omit to skip the OIDC stack entirely. */
+  readonly github?: { repo: string; roleName: string; ownerId?: string; repoId?: string; oidcProviderArn?: string }
+  readonly stackProps?: Omit<StackProps, 'env'>
+  readonly siteOverrides?: Partial<{ unversioned: string[]; distributionOverrides: ...; additionalBehaviors: ... }>
+  readonly previewOverrides?: Partial<{ machineUserName: string; parameterPrefix: string; distributionOverrides: ... }>
+}
+
+/** Returns every stack and construct it made; `pr`/`previewDeployment` only under `-c pr=<n>`. */
+export function defineSiteStacks(app: App, props: DefineSiteStacksProps): SiteStacks
+
 // ---------- runtime subpaths ----------
 // '@tylerschloesser/cdk-core/auth/browser': loadConfig(), login(devUser?), handleCallback(), getToken(), logout(), apiFetch(), readSse()
 // '@tylerschloesser/cdk-core/auth/server':  createVerifier(env), getUser(c), authMode(), isLocalMode()
@@ -844,7 +880,12 @@ Notes on the abstraction:
   production function URL (thai's frontend mode) is just `backends: { api: importedUrl }` in a
   PR stack; yahn's origin-decides cache policy is a `cachePolicy` prop; both sites' two-Lambda
   split is two entries in `backends`.
-- **Onboarding target**: four stacks, ~60 non-import lines of CDK. Measured in Epoch 5.
+- **Onboarding target**: four stacks, ~60 non-import lines of CDK. **[revised, Epoch 5] Measured:
+  178 by hand, 45 through `defineSiteStacks()`** (`scripts/count-consumer-cdk.sh`, which excludes
+  blank, `import` and comment lines and says so). The refactor was proven to be a no-op the same way
+  Epoch 3's `behaviors.ts` extraction was: `cdk synth` of `CdkCoreShared`, `CdkCorePreview` and
+  `CdkCoreGithubOidc` is byte-identical before and after, and `CdkCoreSite` differs only in the
+  `AWS::CDK::Metadata` analytics blob, whose construct-type list reordered.
 
 ## Epochs
 
@@ -985,6 +1026,13 @@ streaming SSE endpoint, and clean teardown. No auth yet (backends run with `AUTH
   arm64, `externalModules: ['@aws-sdk/*']`), the events URL `RESPONSE_STREAM`.
 - `scripts/verify-preview.sh <n>`: curls `/`, `/api/ping`, `/api/echo` (POST with hash),
   `/events/tick?n=5` with `curl -N` and timestamps, and a nonexistent host expecting 404.
+  **[revised, Epoch 5] The SSE check needs an ID token, and had been silently failing since
+  Epoch 4.** Making `/events/*` require auth turned the unauthenticated stream into a 401, and
+  nothing caught it: Epoch 4's own handoff only ran the script in `--expect-absent` mode, where
+  a failing request is the expected result. It now takes `--id-token` (or `CDK_CORE_ID_TOKEN`)
+  and, given no token, asserts the endpoint answers **401** — which is a better check than the
+  one it replaced, because it proves from the outside that the preview API enforces auth. The
+  script stays credential-free; minting the token is `scripts/preview-login.sh`'s job.
 - `.claude/rules/cdk.md` with the gotchas that bit (start from yahn's five).
 
 **Files.** `packages/cdk-core/src/{preview-site,preview-deployment,certificate,router,handlers}/**`,
@@ -1207,7 +1255,11 @@ can take a PR from open to verified-in-preview with no human step.
 **Deliverables.**
 - Package hygiene: `files`, `dist/` with handlers, `exports` map with types, `README.md` in
   the package (install, the three constructs, the four-stack layout, the skills), version
-  `0.1.0`, `npm publish --access public`, git tag `v0.1.0`. Reference switches from
+  `0.1.0`, **[revised, Epoch 5] `pnpm publish --access public`** — never `npm publish`: every
+  version in this workspace is a `catalog:` specifier and only pnpm rewrites those to real
+  ranges as it packs, so an npm-packed tarball ships `"aws-jwt-verify": "catalog:"` and dies in
+  the consumer's install with `EUNSUPPORTEDPROTOCOL`. Caught by `consumer-smoke.sh --pack`
+  before 0.1.0 went out. Then git tag `v0.1.0`. Reference switches from
   `workspace:*`? **No** — it stays on `workspace:*` so this repo dogfoods HEAD; a
   `scripts/consumer-smoke.sh` creates a temp dir, installs the published version, and
   synthesizes the four stacks from `templates/` to prove the tarball works.
@@ -1238,7 +1290,8 @@ can take a PR from open to verified-in-preview with no human step.
 **Acceptance test.**
 ```
 npm view @tylerschloesser/cdk-core version        # 0.1.0
-scripts/consumer-smoke.sh                          # synth of 4 stacks from the tarball succeeds
+scripts/consumer-smoke.sh                          # synth of 4 stacks + a PR stack from the tarball
+scripts/consumer-smoke.sh --pack                   # the same, pre-publish, from `pnpm pack`
 claude plugin validate ./plugins/cdk-core          # passes
 scripts/count-consumer-cdk.sh                      # ≤ 60
 # the end-to-end run above, verified by `gh pr view <n> --json state,comments`
