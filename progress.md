@@ -904,3 +904,24 @@ AWS_PROFILE=admin aws budgets delete-budget --account-id 063257577013 --region u
   pool ids and the two app client ids** are in tracked files. Pool and client ids are not
   credentials — they appear in every authorize URL — but the confirm asked for after Epoch 1 is
   still outstanding and this epoch added to it again.
+
+### The merge
+
+Epoch 4 landed on `main` as **PR #7** (`eee3393`), squashed. Both `CI` and `PR Preview` were
+green on the final commit (`88b5adf`), `pr-teardown.yml` deleted `CdkCore-pr-7` on close (run
+`34069548880`), and `deploy.yml` deployed production on the merge (run `34069548866`) — its
+post-deploy e2e run against `https://cdk-core.ty.ler.dev` is 5 passed, 5 skipped, the five
+skips being the machine-auth specs that production has no identity for by design.
+
+Final state of the account: `CdkCoreShared`, `CdkCorePreview`, `CdkCoreSite`,
+`CdkCoreGithubOidc`, and **no** `CdkCore-pr-*`. KVS `[]`, preview bucket empty,
+`cdk-core sweep --dry-run` printed `(nothing to reconcile)` and exited 0,
+`https://cdk-core.ty.ler.dev/api/ping` answers `{"message":"pong"}`, and
+`scripts/verify-preview.sh 7 --expect-absent` is 7 passed, 0 failed.
+
+One thing to know about that last check: run immediately after `pr-teardown.yml` completes it
+reported **5 passed, 2 failed**, and a re-run a minute later was 7/7. The stack delete removes
+the KVS key, but the edge has already-cached 200s for paths it served seconds earlier. Give it
+a minute before treating an `--expect-absent` failure as real.
+
+`main` is the base for Epoch 5's branch.

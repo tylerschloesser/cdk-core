@@ -17,7 +17,10 @@
 > `us-east-1_D9US7hu40` + the `claude` machine user), `CdkCoreSite` (prod pool
 > `us-east-1_havW5h4hk`), `CdkCoreGithubOidc`, two Secrets Manager secrets, and an account-wide
 > $10/month budget. `pnpm verify`, `pnpm dev` and `pnpm e2e` still need no credentials. Epoch 4
-> is **PR #7**. The next session runs `/epoch 5`.
+> merged to `main` as **PR #7** (`eee3393`), with `deploy.yml` green on the merge (run
+> `34069548866`) and `pr-teardown.yml` green on the close; **no PR stack is alive**, the KVS and
+> preview bucket are empty, and `cdk-core sweep --dry-run` exits 0. `main` is the base for
+> Epoch 5's branch. The next session runs `/epoch 5`.
 >
 > **Measured against the [acceptance criteria](#acceptance-criteria):** A1 met — 95 s and 93 s
 > for a new preview stack, 29/33/33 s for a repeat, 88 s and 113 s from a real `git push` to the
