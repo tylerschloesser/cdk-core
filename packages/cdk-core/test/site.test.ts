@@ -294,42 +294,122 @@ describe('Site', () => {
     ).toThrow(/pnpm build/)
   })
 
-  it('warns rather than silently ignoring an auth prop it does not implement yet', () => {
-    const app = new App()
-    const stack = new Stack(app, 'WithAuth', {
-      env: { account: '111122223333', region: 'us-east-1' },
-    })
-    const zone = route53.HostedZone.fromHostedZoneAttributes(stack, 'Zone', {
-      hostedZoneId: 'Z0000000000000000000',
-      zoneName: 'ty.ler.dev',
-    })
-    const certificate = acm.Certificate.fromCertificateArn(
-      stack,
-      'Cert',
-      'arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000',
-    )
-    const fn = new lambda.Function(stack, 'Fn', {
-      runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline('exports.handler = async () => ({})'),
-    })
-    const site = new Site(stack, 'Site', {
-      domain: 'cdk-core.ty.ler.dev',
-      zone,
-      certificate,
-      webDist,
-      auth: { idTokenValidity: Duration.hours(1) },
-      backends: {
-        api: {
-          pathPattern: '/api/*',
-          functionUrl: fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM }),
+  describe('auth', () => {
+    function buildWithAuth(): { site: Site; template: Template } {
+      const app = new App()
+      const stack = new Stack(app, 'WithAuth', {
+        env: { account: '111122223333', region: 'us-east-1' },
+      })
+      const zone = route53.HostedZone.fromHostedZoneAttributes(stack, 'Zone', {
+        hostedZoneId: 'Z0000000000000000000',
+        zoneName: 'ty.ler.dev',
+      })
+      const certificate = acm.Certificate.fromCertificateArn(
+        stack,
+        'Cert',
+        'arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000',
+      )
+      const fn = new lambda.Function(stack, 'Fn', {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => ({})'),
+      })
+      const site = new Site(stack, 'Site', {
+        domain: 'cdk-core.ty.ler.dev',
+        zone,
+        certificate,
+        webDist,
+        auth: { domainPrefix: 'cdk-core', idTokenValidity: Duration.hours(1) },
+        backends: {
+          api: {
+            pathPattern: '/api/*',
+            functionUrl: fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM }),
+          },
         },
-      },
+      })
+      return { site, template: Template.fromStack(stack) }
+    }
+
+    /**
+     * **The load-bearing assertion of the whole epoch.** D6 claims machine
+     * sign-in is *structurally* impossible against prod, and this list is the
+     * structure: an omitted `ExplicitAuthFlows` makes Cognito fall back to its
+     * legacy defaults, which include `ALLOW_USER_SRP_AUTH`. CDK's L2 omits it
+     * for both an absent and an empty `authFlows`, so the value is pinned on
+     * the L1 — and this test is what keeps a later refactor from "simplifying"
+     * that away into a pool that quietly accepts passwords.
+     */
+    it('gives the prod client refresh and nothing else', () => {
+      const { template } = buildWithAuth()
+      template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+        ExplicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH'],
+        AllowedOAuthFlows: ['code'],
+        AllowedOAuthFlowsUserPoolClient: true,
+        SupportedIdentityProviders: ['Google'],
+        CallbackURLs: ['https://cdk-core.ty.ler.dev/auth/callback'],
+        LogoutURLs: ['https://cdk-core.ty.ler.dev/'],
+        PreventUserExistenceErrors: 'ENABLED',
+      })
+      // Google *only*: leaving `supportedIdentityProviders` unset would add
+      // `COGNITO`, which is what puts a username/password box on the hosted UI.
+      const clients = Object.values(template.findResources('AWS::Cognito::UserPoolClient'))
+      expect(clients).toHaveLength(1)
+      const config = (clients[0] as { Properties: Record<string, unknown> }).Properties
+      expect(config.SupportedIdentityProviders).not.toContain('COGNITO')
+      expect(config.GenerateSecret).toBe(false)
     })
-    expect(site.authEnvironment).toEqual({})
-    const warnings = site.node.metadata.filter((m) => m.type === 'aws:cdk:warning')
-    expect(warnings).toHaveLength(1)
-    expect(String(warnings[0]?.data)).toContain('Epoch 4')
+
+    it('creates no native user and no password path in the prod stack', () => {
+      const { template } = buildWithAuth()
+      template.resourceCountIs('AWS::Cognito::UserPoolUser', 0)
+      template.resourceCountIs('Custom::CdkCorePoolUser', 0)
+      template.resourceCountIs('AWS::SecretsManager::Secret', 0)
+    })
+
+    it('reads the Google client id and secret as dynamic references, never as template text', () => {
+      const { template } = buildWithAuth()
+      const providers = Object.values(
+        template.findResources('AWS::Cognito::UserPoolIdentityProvider'),
+      ) as { Properties: { ProviderName: string; ProviderDetails: Record<string, unknown> } }[]
+      expect(providers).toHaveLength(1)
+      const provider = providers[0]!.Properties
+      expect(provider.ProviderName).toBe('Google')
+      // Both halves render as an `Fn::Join` around `{{resolve:secretsmanager:…}}`
+      // (the partition is a pseudo-parameter), so the assertion is on the
+      // serialized form: what matters is that neither value is ever literal.
+      expect(JSON.stringify(provider.ProviderDetails.client_id)).toContain(
+        'secret:cdk-core/google-oauth:SecretString:clientId::}}',
+      )
+      expect(JSON.stringify(provider.ProviderDetails.client_secret)).toContain(
+        'secret:cdk-core/google-oauth:SecretString:clientSecret::}}',
+      )
+      expect(provider.ProviderDetails.authorize_scopes).toBe('openid email profile')
+    })
+
+    it('uses the domain prefix it was given, because Google was told the same one', () => {
+      const { template } = buildWithAuth()
+      template.hasResourceProperties('AWS::Cognito::UserPoolDomain', {
+        Domain: 'cdk-core',
+      })
+    })
+
+    it('hands the backends AUTH=cognito with the pool it just built', () => {
+      const { site } = buildWithAuth()
+      expect(site.authEnvironment).toMatchObject({ AUTH: 'cognito' })
+      expect(Object.keys(site.authEnvironment).sort()).toEqual([
+        'AUTH',
+        'AUTH_CLIENT_ID',
+        'AUTH_ISSUER',
+      ])
+      expect(site.userPool).toBeDefined()
+      expect(site.userPoolClient).toBeDefined()
+    })
+
+    it('builds no pool at all when `auth` is omitted', () => {
+      const { template } = build()
+      template.resourceCountIs('AWS::Cognito::UserPool', 0)
+      template.resourceCountIs('AWS::Cognito::UserPoolClient', 0)
+    })
   })
 })
 

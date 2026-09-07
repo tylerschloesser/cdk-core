@@ -8,8 +8,14 @@
  * `applyKvsRoute` itself knows nothing about Lambda, CloudFormation, or the
  * AWS SDK — it is exercised in tests against the `KvsStore` interface below.
  * `handler` is the thin wrapper that builds a real store and dispatches on
- * `RequestType`. Epoch 4 adds a second `ResourceType` (`PoolUser`); an
- * unknown one throws.
+ * `RequestType`.
+ *
+ * [Epoch 4] A second `ResourceType`, `PoolUser`, lives here too: the preview
+ * pool's machine user (plan.md D6). It is the same shape of problem — an API
+ * CloudFormation has no resource type for — and `applyPoolUser` is written
+ * against the `PoolUserDirectory` interface for the same reason. One bundle
+ * serves both because `PreviewSite` and `PreviewDeployment` would otherwise
+ * ship two nearly identical Lambdas. An unknown `ResourceType` throws.
  */
 
 import type {
@@ -122,6 +128,101 @@ export async function applyKvsRoute(
   throw new Error('applyKvsRoute: exhausted attempts without resolving')
 }
 
+/**
+ * The Cognito admin calls the machine user needs, and the one Secrets Manager
+ * read that feeds them. Named apart from the SDK so `applyPoolUser` can be
+ * tested against a fake.
+ */
+export interface PoolUserDirectory {
+  createUser(input: { userPoolId: string; username: string; email: string }): Promise<void>
+  setPassword(input: {
+    userPoolId: string
+    username: string
+    password: string
+  }): Promise<void>
+  deleteUser(input: { userPoolId: string; username: string }): Promise<void>
+  readPassword(input: { secretArn: string; passwordKey: string }): Promise<string>
+}
+
+export interface PoolUserRequest {
+  readonly operation: 'upsert' | 'delete'
+  readonly userPoolId: string
+  readonly username: string
+  readonly email?: string
+  readonly secretArn?: string
+  readonly passwordKey?: string
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === 'UsernameExistsException'
+}
+
+function isGone(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name
+  return name === 'UserNotFoundException' || name === 'ResourceNotFoundException'
+}
+
+/**
+ * Creates (or repairs) the machine user and gives it a permanent password.
+ *
+ * `AdminCreateUser` is the only way in: the pool has self-sign-up off, and it
+ * runs with `MessageAction: SUPPRESS` so Cognito never emails the address —
+ * which is not a real mailbox. The freshly created user is in
+ * `FORCE_CHANGE_PASSWORD`, and `AdminSetUserPassword --permanent` is what
+ * moves it to `CONFIRMED` so `USER_PASSWORD_AUTH` returns tokens instead of a
+ * challenge. An existing user is not an error — a stack update re-runs this,
+ * and re-setting the password is how a rotated secret takes effect.
+ *
+ * The password is read here, at runtime, from Secrets Manager: it must never
+ * reach the CloudFormation template, a change set, or a stack event.
+ */
+export async function applyPoolUser(
+  directory: PoolUserDirectory,
+  request: PoolUserRequest,
+): Promise<string> {
+  const id = `pooluser:${request.userPoolId}#${request.username}`
+
+  if (request.operation === 'delete') {
+    try {
+      await directory.deleteUser({
+        userPoolId: request.userPoolId,
+        username: request.username,
+      })
+    } catch (error) {
+      // A user, or a whole pool, that is already gone is a successful delete.
+      // A stack delete must never wedge on cleanup.
+      if (!isGone(error)) throw error
+    }
+    return id
+  }
+
+  if (!request.secretArn || !request.passwordKey) {
+    throw new Error('PoolUser: SecretArn and PasswordKey are required to create a user')
+  }
+
+  try {
+    await directory.createUser({
+      userPoolId: request.userPoolId,
+      username: request.username,
+      email: request.email ?? '',
+    })
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error
+  }
+
+  const password = await directory.readPassword({
+    secretArn: request.secretArn,
+    passwordKey: request.passwordKey,
+  })
+  await directory.setPassword({
+    userPoolId: request.userPoolId,
+    username: request.username,
+    password,
+  })
+
+  return id
+}
+
 interface KvsRouteResourceProperties {
   readonly ResourceType: 'KvsRoute'
   readonly KvsArn: string
@@ -129,7 +230,16 @@ interface KvsRouteResourceProperties {
   readonly Value: string
 }
 
-type ResourceProperties = KvsRouteResourceProperties
+interface PoolUserResourceProperties {
+  readonly ResourceType: 'PoolUser'
+  readonly UserPoolId: string
+  readonly Username: string
+  readonly Email: string
+  readonly SecretArn: string
+  readonly PasswordKey: string
+}
+
+type ResourceProperties = KvsRouteResourceProperties | PoolUserResourceProperties
 
 async function createKvsStore(): Promise<KvsStore> {
   // Imported lazily so `applyKvsRoute` — the piece the unit tests exercise —
@@ -165,15 +275,93 @@ async function createKvsStore(): Promise<KvsStore> {
   }
 }
 
+async function createPoolUserDirectory(): Promise<PoolUserDirectory> {
+  // Lazy, like `createKvsStore`: the pure half of this module is what the unit
+  // tests exercise, and it must not drag the AWS SDK into a vitest run.
+  const {
+    CognitoIdentityProviderClient,
+    AdminCreateUserCommand,
+    AdminSetUserPasswordCommand,
+    AdminDeleteUserCommand,
+  } = await import('@aws-sdk/client-cognito-identity-provider')
+  const { SecretsManagerClient, GetSecretValueCommand } = await import(
+    '@aws-sdk/client-secrets-manager'
+  )
+
+  const cognito = new CognitoIdentityProviderClient({ region: 'us-east-1' })
+  const secrets = new SecretsManagerClient({ region: 'us-east-1' })
+
+  return {
+    async createUser({ userPoolId, username, email }) {
+      await cognito.send(
+        new AdminCreateUserCommand({
+          UserPoolId: userPoolId,
+          Username: username,
+          // The address is not a mailbox; SUPPRESS is what keeps Cognito from
+          // trying to send an invitation to it.
+          MessageAction: 'SUPPRESS',
+          UserAttributes: [
+            { Name: 'email', Value: email },
+            { Name: 'email_verified', Value: 'true' },
+          ],
+        }),
+      )
+    },
+    async setPassword({ userPoolId, username, password }) {
+      await cognito.send(
+        new AdminSetUserPasswordCommand({
+          UserPoolId: userPoolId,
+          Username: username,
+          Password: password,
+          Permanent: true,
+        }),
+      )
+    },
+    async deleteUser({ userPoolId, username }) {
+      await cognito.send(
+        new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: username }),
+      )
+    },
+    async readPassword({ secretArn, passwordKey }) {
+      const response = await secrets.send(
+        new GetSecretValueCommand({ SecretId: secretArn }),
+      )
+      if (!response.SecretString) {
+        throw new Error(`secret ${secretArn} has no SecretString`)
+      }
+      const parsed = JSON.parse(response.SecretString) as Record<string, unknown>
+      const password = parsed[passwordKey]
+      if (typeof password !== 'string' || !password) {
+        throw new Error(`secret ${secretArn} has no string field ${passwordKey}`)
+      }
+      return password
+    },
+  }
+}
+
 export const handler = async (
   event: CdkCustomResourceEvent<ResourceProperties>,
 ): Promise<CdkCustomResourceResponse> => {
-  const { ResourceType, KvsArn, Key, Value } = event.ResourceProperties
+  const properties = event.ResourceProperties
 
-  if (ResourceType !== 'KvsRoute') {
-    throw new Error(`unknown ResourceType: ${String(ResourceType)}`)
+  if (properties.ResourceType === 'PoolUser') {
+    const directory = await createPoolUserDirectory()
+    const PhysicalResourceId = await applyPoolUser(directory, {
+      operation: event.RequestType === 'Delete' ? 'delete' : 'upsert',
+      userPoolId: properties.UserPoolId,
+      username: properties.Username,
+      email: properties.Email,
+      secretArn: properties.SecretArn,
+      passwordKey: properties.PasswordKey,
+    })
+    return { PhysicalResourceId }
   }
 
+  if (properties.ResourceType !== 'KvsRoute') {
+    throw new Error(`unknown ResourceType: ${String((properties as { ResourceType: unknown }).ResourceType)}`)
+  }
+
+  const { KvsArn, Key, Value } = properties
   const store = await createKvsStore()
 
   if (event.RequestType === 'Delete') {

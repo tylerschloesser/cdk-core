@@ -60,5 +60,17 @@ export interface AuthProps {
 export interface AuthEnvironment {
   readonly AUTH: 'cognito'
   readonly AUTH_ISSUER: string
+  /**
+   * The app client id a token's `aud` must match — or a **comma-separated
+   * list** of them.
+   *
+   * Prod is one id. A preview is two, because the machine user signs in
+   * through the `machine` client and a human through the `browser` one, and
+   * `aud` is the client that minted the token, not the pool. Trusting both is
+   * safe and trusting one is not enough: the isolation that matters is the
+   * *pool* (D4), which the `iss` check enforces, and both clients live in the
+   * preview pool. The prod verifier still rejects every preview token, because
+   * its issuer is a different pool entirely.
+   */
   readonly AUTH_CLIENT_ID: string
 }

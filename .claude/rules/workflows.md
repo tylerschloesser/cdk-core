@@ -9,8 +9,8 @@ paths:
 # Workflows, the deploy role, and the sweeper
 
 Loaded when you touch a workflow, a workflow template, the OIDC role or the sweeper. The CDK
-side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, and KVS writes
-are `.claude/rules/streaming-and-kvs.md`.
+side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, KVS writes are
+`.claude/rules/streaming-and-kvs.md`, and the user pools are `.claude/rules/auth.md`.
 
 ## The five workflows
 
@@ -52,12 +52,18 @@ are `.claude/rules/streaming-and-kvs.md`.
     `delete-stack` has already succeeded, so the stack goes but the run is red. Having no
     checkout is the point (a PR whose branch no longer builds still has to tear down), so do
     not "fix" this by adding a checkout step.
-4. **`CdkCoreGithubOidc` synthesizes on every CDK command**, CI included, and does two SSM
+4. **The role reads exactly one secret.** `pr-preview.yml` runs the e2e suite against the
+    deployed preview, and the machine-auth fixture signs in as the preview pool's `claude`
+    user — so the role has `secretsmanager:GetSecretValue` on
+    `secret:<domain>/preview-machine-user-*` (the trailing `-*` is Secrets Manager's own ARN
+    suffix, not a widening). `cognito-idp:InitiateAuth` is deliberately *not* granted:
+    `InitiateAuth` is unauthenticated and the fixture calls it `--no-sign-request`.
+5. **`CdkCoreGithubOidc` synthesizes on every CDK command**, CI included, and does two SSM
     lookups (`kvsArn`, `bucketName`) cached in the committed `infra/cdk.context.json`. If
     `CdkCorePreview` is ever recreated those values change and the file goes stale — the role
     ends up scoped to a dead ARN and the sweeper starts getting `AccessDenied`. Delete the two
     entries and re-synth with credentials.
-5. **`Site`'s two `BucketDeployment`s have asymmetric `prune`** — `true` on the hashed half
+6. **`Site`'s two `BucketDeployment`s have asymmetric `prune`** — `true` on the hashed half
     (with the unversioned globs excluded), `false` on the unversioned half. `true` on the
     second deletes every hashed asset the first just uploaded, because it only *includes* those
     globs.

@@ -12,7 +12,13 @@ catalogs:
     '@aws-sdk/client-cloudfront-keyvaluestore':
       specifier: ^3.1127.0
       version: 3.1127.0
+    '@aws-sdk/client-cognito-identity-provider':
+      specifier: ^3.1127.0
+      version: 3.1127.0
     '@aws-sdk/client-s3':
+      specifier: ^3.1127.0
+      version: 3.1127.0
+    '@aws-sdk/client-secrets-manager':
       specifier: ^3.1127.0
       version: 3.1127.0
     '@aws-sdk/client-ssm':
@@ -48,6 +54,9 @@ catalogs:
     aws-cdk-lib:
       specifier: ^2.268.0
       version: 2.268.0
+    aws-jwt-verify:
+      specifier: ^5.2.1
+      version: 5.2.1
     constructs:
       specifier: ^10.8.1
       version: 10.8.1
@@ -187,6 +196,10 @@ importers:
         version: 6.0.3
 
   packages/cdk-core:
+    dependencies:
+      aws-jwt-verify:
+        specifier: 'catalog:'
+        version: 5.2.1
     devDependencies:
       '@aws-sdk/client-cloudformation':
         specifier: 'catalog:'
@@ -194,7 +207,13 @@ importers:
       '@aws-sdk/client-cloudfront-keyvaluestore':
         specifier: 'catalog:'
         version: 3.1127.0
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: 'catalog:'
+        version: 3.1127.0
       '@aws-sdk/client-s3':
+        specifier: 'catalog:'
+        version: 3.1127.0
+      '@aws-sdk/client-secrets-manager':
         specifier: 'catalog:'
         version: 3.1127.0
       '@aws-sdk/client-ssm':
@@ -249,8 +268,16 @@ packages:
     resolution: {integrity: sha512-Bx/KcY2lRI8k2qpzuXVg1MG57R7G5IkIKKkaIGbpIrgjKapHr72nX7EY3hGnDJqmkNrD7bJaCm9eclTbLuu0nA==}
     engines: {node: '>=20.0.0'}
 
+  '@aws-sdk/client-cognito-identity-provider@3.1127.0':
+    resolution: {integrity: sha512-h0mINSImCeIbXxvr3b4e1ae5ZU5bedsyXUH13peYmhtjOW/fH/vZWwf01hnv371WAa/P4HlqaYJ3aF7yJ2BD3g==}
+    engines: {node: '>=20.0.0'}
+
   '@aws-sdk/client-s3@3.1127.0':
     resolution: {integrity: sha512-0ZSAgmEda33xPqVPt+bx2KzrXV1cUCKRRVPGliLu+V7DzHPa04CqPSi1maGEM4O0LDP0iI6HRSW5ULloNwayNw==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-secrets-manager@3.1127.0':
+    resolution: {integrity: sha512-sgTX/mZ0kYrFukwm238T5OyRKT3QxUS9VdSl4iD8pu9vyZxS+PpZgASCdTJoRvdv99NPOvEaXcQ1ecsCjnqNug==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-ssm@3.1127.0':
@@ -835,6 +862,10 @@ packages:
     engines: {node: '>= 18.0.0'}
     hasBin: true
 
+  aws-jwt-verify@5.2.1:
+    resolution: {integrity: sha512-J+buA4M+qvQDk58WXFBLkDodkEX3DDL1ac5XFQPW3opxAsaLXYu5hYnlSHsaBRDBUXBAn695kE/cw/mdyJKwJg==}
+    engines: {node: '>=18.0.0'}
+
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
 
@@ -1191,6 +1222,17 @@ snapshots:
       '@smithy/types': 4.18.0
       tslib: 2.8.1
 
+  '@aws-sdk/client-cognito-identity-provider@3.1127.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/credential-provider-node': 3.972.82
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/fetch-http-handler': 5.8.0
+      '@smithy/node-http-handler': 4.12.1
+      '@smithy/types': 4.18.0
+      tslib: 2.8.1
+
   '@aws-sdk/client-s3@3.1127.0':
     dependencies:
       '@aws-sdk/checksums': 3.1000.29
@@ -1198,6 +1240,17 @@ snapshots:
       '@aws-sdk/credential-provider-node': 3.972.82
       '@aws-sdk/middleware-sdk-s3': 3.972.75
       '@aws-sdk/signature-v4-multi-region': 3.996.46
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/fetch-http-handler': 5.8.0
+      '@smithy/node-http-handler': 4.12.1
+      '@smithy/types': 4.18.0
+      tslib: 2.8.1
+
+  '@aws-sdk/client-secrets-manager@3.1127.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/credential-provider-node': 3.972.82
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3
       '@smithy/fetch-http-handler': 5.8.0
@@ -1654,6 +1707,8 @@ snapshots:
       constructs: 10.8.1
 
   aws-cdk@2.1140.0: {}
+
+  aws-jwt-verify@5.2.1: {}
 
   bowser@2.14.1: {}
 

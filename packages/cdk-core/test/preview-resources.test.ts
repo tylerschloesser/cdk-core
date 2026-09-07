@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyKvsRoute } from '../src/handlers/preview-resources.js'
-import type { KvsStore } from '../src/handlers/preview-resources.js'
+import { applyKvsRoute, applyPoolUser } from '../src/handlers/preview-resources.js'
+import type { KvsStore, PoolUserDirectory } from '../src/handlers/preview-resources.js'
 
 const KVS_ARN = 'arn:aws:cloudfront::063257577013:key-value-store/test'
 
@@ -208,5 +208,222 @@ describe('applyKvsRoute', () => {
     const ms = sleep2.mock.calls[0]?.[0]
     expect(ms).toBeGreaterThanOrEqual(100)
     expect(ms).toBeLessThan(500)
+  })
+})
+
+const USER_POOL_ID = 'us-east-1_TestPool'
+const SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:063257577013:secret:test-abc123'
+
+function fakeDirectory(overrides: Partial<PoolUserDirectory> = {}): PoolUserDirectory {
+  return {
+    createUser: vi.fn(async () => undefined),
+    setPassword: vi.fn(async () => undefined),
+    deleteUser: vi.fn(async () => undefined),
+    readPassword: vi.fn(async () => 'fake-password'),
+    ...overrides,
+  }
+}
+
+function usernameExistsError(): Error {
+  const error = new Error('exists')
+  error.name = 'UsernameExistsException'
+  return error
+}
+
+function invalidParameterError(): Error {
+  const error = new Error('invalid')
+  error.name = 'InvalidParameterException'
+  return error
+}
+
+function userNotFoundError(): Error {
+  const error = new Error('not found')
+  error.name = 'UserNotFoundException'
+  return error
+}
+
+function resourceNotFoundError(): Error {
+  const error = new Error('not found')
+  error.name = 'ResourceNotFoundException'
+  return error
+}
+
+function accessDeniedError2(): Error {
+  const error = new Error('denied')
+  error.name = 'AccessDeniedException'
+  return error
+}
+
+describe('applyPoolUser', () => {
+  it('on upsert, creates the user then reads the password then sets it, in that order', async () => {
+    const calls: string[] = []
+    const createUser = vi.fn(async () => {
+      calls.push('createUser')
+    })
+    const readPassword = vi.fn(async () => {
+      calls.push('readPassword')
+      return 'secret-pw'
+    })
+    const setPassword = vi.fn(async () => {
+      calls.push('setPassword')
+    })
+    const directory = fakeDirectory({ createUser, readPassword, setPassword })
+
+    await applyPoolUser(directory, {
+      operation: 'upsert',
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+      email: 'preview-bot@example.com',
+      secretArn: SECRET_ARN,
+      passwordKey: 'password',
+    })
+
+    expect(calls).toEqual(['createUser', 'readPassword', 'setPassword'])
+    expect(createUser).toHaveBeenCalledWith({
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+      email: 'preview-bot@example.com',
+    })
+    // The password handed to setPassword must be the one readPassword supplied
+    // — it must never be derived, hardcoded, or come from anywhere else, since
+    // the whole design is that the password lives only in Secrets Manager.
+    expect(setPassword).toHaveBeenCalledWith({
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+      password: 'secret-pw',
+    })
+  })
+
+  it('treats an existing user (UsernameExistsException) as success and still re-sets the password', async () => {
+    const createUser = vi.fn(async () => {
+      throw usernameExistsError()
+    })
+    const readPassword = vi.fn(async () => 'rotated-pw')
+    const setPassword = vi.fn(async () => undefined)
+    const directory = fakeDirectory({ createUser, readPassword, setPassword })
+
+    const id = await applyPoolUser(directory, {
+      operation: 'upsert',
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+      email: 'preview-bot@example.com',
+      secretArn: SECRET_ARN,
+      passwordKey: 'password',
+    })
+
+    expect(id).toBe(`pooluser:${USER_POOL_ID}#preview-bot`)
+    expect(readPassword).toHaveBeenCalledTimes(1)
+    expect(setPassword).toHaveBeenCalledWith(
+      expect.objectContaining({ password: 'rotated-pw' }),
+    )
+  })
+
+  it('propagates a createUser failure that is not "already exists"', async () => {
+    const createUser = vi.fn(async () => {
+      throw invalidParameterError()
+    })
+    const readPassword = vi.fn(async () => 'pw')
+    const setPassword = vi.fn(async () => undefined)
+    const directory = fakeDirectory({ createUser, readPassword, setPassword })
+
+    await expect(
+      applyPoolUser(directory, {
+        operation: 'upsert',
+        userPoolId: USER_POOL_ID,
+        username: 'preview-bot',
+        email: 'preview-bot@example.com',
+        secretArn: SECRET_ARN,
+        passwordKey: 'password',
+      }),
+    ).rejects.toMatchObject({ name: 'InvalidParameterException' })
+
+    expect(readPassword).not.toHaveBeenCalled()
+    expect(setPassword).not.toHaveBeenCalled()
+  })
+
+  it('deletes the user', async () => {
+    const deleteUser = vi.fn(async () => undefined)
+    const directory = fakeDirectory({ deleteUser })
+
+    const id = await applyPoolUser(directory, {
+      operation: 'delete',
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+    })
+
+    expect(deleteUser).toHaveBeenCalledWith({
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+    })
+    expect(id).toBe(`pooluser:${USER_POOL_ID}#preview-bot`)
+  })
+
+  it('treats a delete against an already-gone user or pool as success', async () => {
+    for (const error of [userNotFoundError(), resourceNotFoundError()]) {
+      const deleteUser = vi.fn(async () => {
+        throw error
+      })
+      const directory = fakeDirectory({ deleteUser })
+
+      const id = await applyPoolUser(directory, {
+        operation: 'delete',
+        userPoolId: USER_POOL_ID,
+        username: 'preview-bot',
+      })
+
+      expect(id).toBe(`pooluser:${USER_POOL_ID}#preview-bot`)
+    }
+  })
+
+  it('propagates a delete failure that is not "already gone"', async () => {
+    const deleteUser = vi.fn(async () => {
+      throw accessDeniedError2()
+    })
+    const directory = fakeDirectory({ deleteUser })
+
+    await expect(
+      applyPoolUser(directory, {
+        operation: 'delete',
+        userPoolId: USER_POOL_ID,
+        username: 'preview-bot',
+      }),
+    ).rejects.toMatchObject({ name: 'AccessDeniedException' })
+  })
+
+  it('throws before touching the directory when secretArn/passwordKey are missing on upsert', async () => {
+    const directory = fakeDirectory()
+
+    await expect(
+      applyPoolUser(directory, {
+        operation: 'upsert',
+        userPoolId: USER_POOL_ID,
+        username: 'preview-bot',
+        email: 'preview-bot@example.com',
+      }),
+    ).rejects.toThrow('SecretArn and PasswordKey are required')
+
+    expect(directory.createUser).not.toHaveBeenCalled()
+    expect(directory.readPassword).not.toHaveBeenCalled()
+    expect(directory.setPassword).not.toHaveBeenCalled()
+    expect(directory.deleteUser).not.toHaveBeenCalled()
+  })
+
+  it('derives a physical resource id from pool + username, stable across upsert and delete', async () => {
+    const upsertId = await applyPoolUser(fakeDirectory(), {
+      operation: 'upsert',
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+      email: 'preview-bot@example.com',
+      secretArn: SECRET_ARN,
+      passwordKey: 'password',
+    })
+    const deleteId = await applyPoolUser(fakeDirectory(), {
+      operation: 'delete',
+      userPoolId: USER_POOL_ID,
+      username: 'preview-bot',
+    })
+
+    expect(upsertId).toBe(`pooluser:${USER_POOL_ID}#preview-bot`)
+    expect(upsertId).toBe(deleteId)
   })
 })

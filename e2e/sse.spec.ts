@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, TARGET } from './fixtures.js'
 
 /**
  * The load-bearing streaming test.
@@ -23,30 +23,50 @@ import { expect, test } from '@playwright/test'
  *     stream is delivered incrementally but far slower than it was produced.
  *
  * Together they bracket "incremental, and roughly at the rate the server sent".
+ *
+ * `/events/tick` requires auth, so this runs against `authedPage` — a plain
+ * `page` would 401 before any of this timing matters. That also puts it out of
+ * reach against production, which has no machine user by design (A7); the
+ * production streaming path was measured unauthenticated in Epoch 3 and is
+ * re-checked by hand after a Google login.
  */
-test('sse events arrive incrementally, not in one buffered flush', async ({ page }) => {
-  await page.goto('/')
+// Declaration scope, not inside the body: fixtures are resolved before a test
+// body runs, and `machineAuth` throws against prod rather than yielding a
+// token that would 401 later.
+test.describe(() => {
+  test.skip(TARGET === 'prod', 'production has no machine user — that is A7, not a gap')
 
-  await page.getByTestId('stream').click()
+  test('sse events arrive incrementally, not in one buffered flush', async ({ authedPage }) => {
+    await authedPage.goto('/')
 
-  const events = page.getByTestId('stream-event')
-  await expect(events).toHaveCount(5, { timeout: 20_000 })
+    await authedPage.getByTestId('stream').click()
 
-  expect(await events.allTextContents()).toEqual(['1', '2', '3', '4', '5'])
+    const events = authedPage.getByTestId('stream-event')
+    await expect(events).toHaveCount(5, { timeout: 20_000 })
 
-  const receivedAt = await events.evaluateAll((nodes) =>
-    nodes.map((node) => Number(node.getAttribute('data-received-at'))),
-  )
-  expect(receivedAt.every((t) => Number.isFinite(t) && t > 0)).toBe(true)
+    expect(await events.allTextContents()).toEqual(['1', '2', '3', '4', '5'])
 
-  const spread = receivedAt[4]! - receivedAt[0]!
-  const secondGap = receivedAt[1]! - receivedAt[0]!
+    const receivedAt = await events.evaluateAll((nodes) =>
+      nodes.map((node) => Number(node.getAttribute('data-received-at'))),
+    )
+    expect(receivedAt.every((t) => Number.isFinite(t) && t > 0)).toBe(true)
 
-  expect(spread, `1st→5th spread was ${spread}ms; a buffered response collapses this to ~0`).toBeGreaterThanOrEqual(400)
-  expect(secondGap, `1st→2nd gap was ${secondGap}ms`).toBeLessThanOrEqual(1500)
+    const spread = receivedAt[4]! - receivedAt[0]!
+    const secondGap = receivedAt[1]! - receivedAt[0]!
 
-  // Arrival order must match emission order, or the parser is reordering frames.
-  for (let i = 1; i < receivedAt.length; i++) {
-    expect(receivedAt[i]!).toBeGreaterThanOrEqual(receivedAt[i - 1]!)
-  }
+    expect(spread, `1st→5th spread was ${spread}ms; a buffered response collapses this to ~0`).toBeGreaterThanOrEqual(400)
+    expect(secondGap, `1st→2nd gap was ${secondGap}ms`).toBeLessThanOrEqual(1500)
+
+    // Arrival order must match emission order, or the parser is reordering frames.
+    for (let i = 1; i < receivedAt.length; i++) {
+      expect(receivedAt[i]!).toBeGreaterThanOrEqual(receivedAt[i - 1]!)
+    }
+  })
+})
+
+// Proves the endpoint is actually protected, not merely reachable: no token
+// at all must 401, the same way `/api/me` does.
+test('sse stream 401s with no token', async ({ request }) => {
+  const res = await request.get('/events/tick?n=5')
+  expect(res.status()).toBe(401)
 })

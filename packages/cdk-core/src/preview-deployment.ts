@@ -19,26 +19,11 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment'
 import * as ssm from 'aws-cdk-lib/aws-ssm'
 import * as cr from 'aws-cdk-lib/custom-resources'
 import { Construct } from 'constructs'
-import * as path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-import type { SiteConfig } from './config.js'
+import type { SiteAuthConfig, SiteConfig } from './config.js'
+import { previewResourcesAssetPath } from './handler-asset.js'
 import { previewParameterPrefix } from './preview-site.js'
 import type { AuthEnvironment } from './types.js'
-
-/**
- * The pre-bundled custom-resource handler, shipped inside the package so a
- * consumer's PR stack needs no bundler and no `node_modules` at deploy time.
- * `dist/preview-deployment.js` sits next to `dist/handlers/`, so this resolves
- * identically from a workspace link and from an installed tarball.
- */
-function handlerAssetPath(): string {
-  return path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    'handlers',
-    'preview-resources',
-  )
-}
 
 export interface PreviewDeploymentProps {
   readonly domain: string
@@ -50,6 +35,18 @@ export interface PreviewDeploymentProps {
   /** Default '/cdk-core/<domain>/preview'. */
   readonly parameterPrefix?: string
   readonly unversioned?: string[]
+  /**
+   * Set when the site's `PreviewSite` was created with `auth`.
+   *
+   * [Epoch 4] There is no way to detect this: the pool's issuer, client id and
+   * hosted-UI domain arrive as SSM parameters, and `valueForStringParameter`
+   * on a parameter that does not exist fails the *deploy*, not the synth. So a
+   * PR stack has to be told, and the consumer already knows — it passed `auth`
+   * to `PreviewSite` in the same `bin/app.ts`.
+   *
+   * @default false
+   */
+  readonly auth?: boolean
 }
 
 export class PreviewDeployment extends Construct {
@@ -75,8 +72,6 @@ export class PreviewDeployment extends Construct {
     const pr = props.pr
     this.hostname = `pr-${pr}.preview.${props.domain}`
     this.url = `https://${this.hostname}`
-    // Epoch 4 fills this in from the preview pool's SSM parameters.
-    this.authEnvironment = {}
 
     const prefix = props.parameterPrefix ?? previewParameterPrefix(props.domain)
     const read = (name: string): string =>
@@ -86,6 +81,27 @@ export class PreviewDeployment extends Construct {
     const distributionId = read('distributionId')
     const distributionArn = read('distributionArn')
     const kvsArn = read('kvsArn')
+
+    // The preview pool is shared by every PR — one pool per site, not per PR
+    // (plan.md D4) — so all a PR stack does is repeat what `PreviewSite`
+    // published: the same issuer and client id onto its Lambdas, the same
+    // three values into its own `__config.json`.
+    let authConfig: SiteAuthConfig | undefined
+    if (props.auth) {
+      const issuer = read('authIssuer')
+      const clientId = read('authClientId')
+      authConfig = { issuer, clientId, domain: read('authDomain') }
+      this.authEnvironment = {
+        AUTH: 'cognito',
+        AUTH_ISSUER: issuer,
+        // Both clients, because the machine user's tokens carry the `machine`
+        // client as their `aud` and a human's carry `browser`. The pool is the
+        // isolation boundary, not the client.
+        AUTH_CLIENT_ID: `${clientId},${read('authMachineClientId')}`,
+      }
+    } else {
+      this.authEnvironment = {}
+    }
 
     const bucket = s3.Bucket.fromBucketName(this, 'PreviewBucket', bucketName)
     const distribution = cloudfront.Distribution.fromDistributionAttributes(
@@ -105,6 +121,7 @@ export class PreviewDeployment extends Construct {
       site: props.domain,
       mode: 'preview',
       pr,
+      auth: authConfig,
     }
 
     // One deployment, not the two that `Site` will need in Epoch 3.
@@ -174,7 +191,7 @@ export class PreviewDeployment extends Construct {
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(handlerAssetPath()),
+      code: lambda.Code.fromAsset(previewResourcesAssetPath()),
       timeout: Duration.minutes(2),
       memorySize: 256,
       description: `cdk-core preview resources for pr-${pr}`,

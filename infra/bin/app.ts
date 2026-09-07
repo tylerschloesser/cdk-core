@@ -24,6 +24,7 @@ import * as route53 from 'aws-cdk-lib/aws-route53'
 import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs'
+import type { AuthEnvironment } from '@tylerschloesser/cdk-core'
 import {
   siteCertificate,
   GithubDeployRole,
@@ -43,6 +44,18 @@ const REPO = 'tylerschloesser/cdk-core'
 const REPO_OWNER_ID = '2300885'
 const REPO_ID = '1359473287'
 const STACK_PREFIX = 'CdkCore'
+
+/**
+ * Cognito hosted-UI prefixes. Written out rather than derived, because these
+ * two strings also exist in a place CDK cannot reach: the Google OAuth
+ * client's authorized redirect URIs
+ * (`https://<prefix>.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`).
+ * A mismatch is a `redirect_uri_mismatch` at Google with nothing in any AWS
+ * log, so the value that has to match a human's console typing is a literal
+ * here, not `domain.replace(/\./g, '-')`.
+ */
+const AUTH_DOMAIN_PREFIX = 'cdk-core'
+const PREVIEW_AUTH_DOMAIN_PREFIX = 'cdk-core-preview'
 
 function importZone(scope: Construct): route53.IHostedZone {
   return route53.HostedZone.fromHostedZoneAttributes(scope, 'Zone', {
@@ -90,6 +103,7 @@ class CdkCorePreview extends Stack {
       zone,
       certificate: props.certificate,
       backends: BACKEND_ROUTING,
+      auth: { domainPrefix: PREVIEW_AUTH_DOMAIN_PREFIX },
     })
   }
 }
@@ -105,10 +119,19 @@ const WEB_DIST = fileURLToPath(new URL('../../apps/web/dist', import.meta.url))
  * route on the first only because `RESPONSE_STREAM` is fixed when a function
  * URL is created and a buffered URL cannot be promoted to one.
  */
-function backendFunctions(scope: Construct): {
-  api: lambda.IFunctionUrl
-  events: lambda.IFunctionUrl
-} {
+interface Backends {
+  readonly api: lambda.IFunctionUrl
+  readonly events: lambda.IFunctionUrl
+  /**
+   * The functions behind the URLs, so the caller can push `authEnvironment`
+   * onto them *after* the construct that owns the user pool has been built.
+   * The pool cannot exist before the function URLs, because the site
+   * construct needs the URLs to build its behaviors — so the env goes on last.
+   */
+  readonly functions: lambda.Function[]
+}
+
+function backendFunctions(scope: Construct): Backends {
   const apiFn = new NodejsFunction(scope, 'ApiFn', {
     entry: API_ENTRY,
     runtime: lambda.Runtime.NODEJS_22_X,
@@ -141,6 +164,19 @@ function backendFunctions(scope: Construct): {
       authType: lambda.FunctionUrlAuthType.AWS_IAM,
       invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
     }),
+    functions: [apiFn, eventsFn],
+  }
+}
+
+/** `AUTH`, `AUTH_ISSUER`, `AUTH_CLIENT_ID` onto every backend, or nothing. */
+function applyAuthEnvironment(
+  backends: Backends,
+  environment: AuthEnvironment | Record<string, never>,
+): void {
+  for (const fn of backends.functions) {
+    for (const [key, value] of Object.entries(environment)) {
+      fn.addEnvironment(key, value)
+    }
   }
 }
 
@@ -165,7 +201,9 @@ class CdkCoreSite extends Stack {
         api: { ...BACKEND_ROUTING.api, functionUrl: urls.api },
         events: { ...BACKEND_ROUTING.events, functionUrl: urls.events },
       },
+      auth: { domainPrefix: AUTH_DOMAIN_PREFIX },
     })
+    applyAuthEnvironment(urls, site.authEnvironment)
 
     new CfnOutput(this, 'SiteUrl', { value: site.url })
   }
@@ -205,7 +243,9 @@ class CdkCorePr extends Stack {
       pr,
       webDist: WEB_DIST,
       backends: { api: urls.api, events: urls.events },
+      auth: true,
     })
+    applyAuthEnvironment(urls, deployment.authEnvironment)
 
     new CfnOutput(this, 'PreviewUrl', { value: deployment.url })
   }

@@ -17,21 +17,26 @@
  * been told about.
  */
 
-import { Annotations, Duration, RemovalPolicy } from 'aws-cdk-lib'
+import { CustomResource, Duration, RemovalPolicy } from 'aws-cdk-lib'
 import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins'
-import type * as cognito from 'aws-cdk-lib/aws-cognito'
+import * as cognito from 'aws-cdk-lib/aws-cognito'
+import * as iam from 'aws-cdk-lib/aws-iam'
+import * as lambda from 'aws-cdk-lib/aws-lambda'
 import * as route53 from 'aws-cdk-lib/aws-route53'
 import * as targets from 'aws-cdk-lib/aws-route53-targets'
 import * as s3 from 'aws-cdk-lib/aws-s3'
-import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
 import * as ssm from 'aws-cdk-lib/aws-ssm'
+import * as cr from 'aws-cdk-lib/custom-resources'
 import { Construct } from 'constructs'
 
 import { backendBehavior, safeDistributionOverrides } from './behaviors.js'
+import { previewResourcesAssetPath } from './handler-asset.js'
 import { renderRouterSource } from './router/render.js'
 import type { AuthProps, BackendProps, SiteDomain } from './types.js'
+import { defaultDomainPrefix, siteUserPool } from './user-pool.js'
 
 /**
  * The origin every backend behavior is *assigned*, and which the router
@@ -66,19 +71,15 @@ export class PreviewSite extends Construct {
   readonly keyValueStore: cloudfront.KeyValueStore
   readonly routerFunction: cloudfront.Function
   readonly userPool?: cognito.UserPool
+  /** The browser app client. Its only callback is the bounce host (plan.md D5). */
+  readonly userPoolClient?: cognito.UserPoolClient
+  /** The `machine` app client — password sign-in, no hosted UI. Preview only. */
+  readonly machineUserPoolClient?: cognito.UserPoolClient
   readonly machineUserSecret?: secretsmanager.ISecret
   readonly parameterPrefix: string
 
   constructor(scope: Construct, id: string, props: PreviewSiteProps) {
     super(scope, id)
-
-    if (props.auth) {
-      Annotations.of(this).addWarningV2(
-        '@tylerschloesser/cdk-core:previewAuthNotImplemented',
-        'PreviewSite: `auth` is accepted but ignored until Epoch 4. No user pool, machine ' +
-          'user or secret is created, and backends run with AUTH unset (= none).',
-      )
-    }
 
     this.parameterPrefix = props.parameterPrefix ?? previewParameterPrefix(props.domain)
 
@@ -185,6 +186,147 @@ export class PreviewSite extends Construct {
     this.parameter('distributionId', this.distribution.distributionId)
     this.parameter('bucketName', this.bucket.bucketName)
     this.parameter('kvsArn', this.keyValueStore.keyValueStoreArn)
+
+    if (props.auth) {
+      const auth = this.createAuth(props, props.auth)
+      this.userPool = auth.userPool
+      this.userPoolClient = auth.userPoolClient
+      this.machineUserPoolClient = auth.machineUserPoolClient
+      this.machineUserSecret = auth.machineUserSecret
+    }
+  }
+
+  /**
+   * The preview pool, and the two things that exist only here: an app client
+   * that can sign in with a password, and a native user to sign in as.
+   *
+   * Both are what make it possible for Claude to drive a preview with no
+   * browser and no Google account (plan.md D6) — and both are absent from the
+   * prod pool, which is why D6 can call machine sign-in structurally
+   * impossible there rather than merely disabled.
+   */
+  private createAuth(
+    props: PreviewSiteProps,
+    auth: AuthProps,
+  ): {
+    userPool: cognito.UserPool
+    userPoolClient: cognito.UserPoolClient
+    machineUserPoolClient: cognito.UserPoolClient
+    machineUserSecret: secretsmanager.Secret
+  } {
+    const machineUserName = props.machineUserName ?? 'claude'
+
+    const pool = siteUserPool(this, 'Auth', {
+      auth,
+      // '-preview' is appended to the *default*; an explicit `domainPrefix` is
+      // used verbatim, because it has to equal what was typed into the Google
+      // OAuth client's redirect URIs and only a human knows that.
+      domainPrefix: auth.domainPrefix ?? `${defaultDomainPrefix(props.domain)}-preview`,
+      userPoolName: `${props.domain} previews`,
+      // One callback for every PR. Cognito allows no wildcards, so the bounce
+      // host is the fixed redirect_uri and `state` carries the PR number
+      // (plan.md D5); the router function turns it back into a per-PR URL.
+      callbackUrls: [`https://oauth.preview.${props.domain}/`],
+      logoutUrls: [`https://oauth.preview.${props.domain}/`],
+    })
+    // `disableOAuth` is what keeps this client off the hosted UI entirely: no
+    // callback URLs, no OAuth flows, nothing for a browser to start. It exists
+    // for exactly one caller, `initiate-auth --auth-flow USER_PASSWORD_AUTH`.
+    const machineUserPoolClient = new cognito.UserPoolClient(this, 'MachineClient', {
+      userPool: pool.userPool,
+      userPoolClientName: 'machine',
+      generateSecret: false,
+      disableOAuth: true,
+      authFlows: { userPassword: true },
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      preventUserExistenceErrors: true,
+      enableTokenRevocation: true,
+    })
+
+    // The password is generated by Secrets Manager and read by the custom
+    // resource at *runtime*: it never appears in the template, the change set,
+    // or a CloudFormation event. Everything else in the JSON is what a caller
+    // needs to turn it into a token, so `preview-login.sh` and the Playwright
+    // fixture read one secret and nothing else.
+    const machineUserSecret = new secretsmanager.Secret(this, 'MachineUser', {
+      secretName: `${props.domain}/preview-machine-user`,
+      description: `cdk-core preview machine user for ${props.domain}`,
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({
+          username: machineUserName,
+          userPoolId: pool.userPool.userPoolId,
+          clientId: machineUserPoolClient.userPoolClientId,
+        }),
+        generateStringKey: 'password',
+        // The pool's password policy requires no symbols precisely so this can
+        // exclude punctuation: a generated password that the policy rejects
+        // fails at `AdminSetUserPassword`, i.e. inside a custom resource, i.e.
+        // as a stack rollback rather than a readable error.
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+      removalPolicy: RemovalPolicy.DESTROY,
+    })
+
+    const onEvent = new lambda.Function(this, 'PoolUserHandler', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(previewResourcesAssetPath()),
+      timeout: Duration.minutes(2),
+      memorySize: 256,
+      description: `cdk-core preview machine user for ${props.domain}`,
+    })
+    onEvent.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'cognito-idp:AdminCreateUser',
+          'cognito-idp:AdminSetUserPassword',
+          'cognito-idp:AdminDeleteUser',
+          'cognito-idp:AdminGetUser',
+        ],
+        resources: [pool.userPool.userPoolArn],
+      }),
+    )
+    machineUserSecret.grantRead(onEvent)
+
+    const provider = new cr.Provider(this, 'PoolUserProvider', { onEventHandler: onEvent })
+
+    new CustomResource(this, 'MachineUserResource', {
+      serviceToken: provider.serviceToken,
+      resourceType: 'Custom::CdkCorePoolUser',
+      properties: {
+        ResourceType: 'PoolUser',
+        UserPoolId: pool.userPool.userPoolId,
+        Username: machineUserName,
+        // `/api/me` identifies a caller by email, so the machine user needs
+        // one; it is not a deliverable address and nothing is ever sent to it
+        // (AdminCreateUser runs with MessageAction: SUPPRESS).
+        Email: `${machineUserName}@${props.domain}`,
+        SecretArn: machineUserSecret.secretArn,
+        PasswordKey: 'password',
+      },
+    })
+
+    // What a PR stack and the e2e fixture read. `authDomain` is here because
+    // the hosted-UI host cannot be derived from the issuer, and the browser
+    // needs it to build both the authorize and the token URL.
+    this.parameter('authIssuer', pool.issuer)
+    this.parameter('authClientId', pool.userPoolClient.userPoolClientId)
+    // Published separately from `authClientId` because the two are read for
+    // different things: the browser puts `authClientId` in its authorize URL,
+    // while the API must accept `aud` from *either* client (see
+    // `AuthEnvironment.AUTH_CLIENT_ID`).
+    this.parameter('authMachineClientId', machineUserPoolClient.userPoolClientId)
+    this.parameter('authDomain', pool.authConfig.domain)
+    this.parameter('machineSecretArn', machineUserSecret.secretArn)
+
+    return {
+      userPool: pool.userPool,
+      userPoolClient: pool.userPoolClient,
+      machineUserPoolClient,
+      machineUserSecret,
+    }
   }
 
   private parameter(name: string, value: string): void {

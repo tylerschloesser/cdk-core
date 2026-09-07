@@ -8,6 +8,7 @@
 
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
+import { getUser } from '@tylerschloesser/cdk-core/auth/server'
 
 const DEFAULT_N = 5
 const MIN_N = 1
@@ -33,8 +34,16 @@ function sleep(ms: number): Promise<void> {
 export function createEventsApp(): Hono {
   const app = new Hono()
 
-  app.get('/events/tick', (c) => {
+  app.get('/events/tick', async (c) => {
     c.header('Cache-Control', 'no-store')
+
+    // [Epoch 4] The streaming endpoint is the authenticated one, on purpose:
+    // A6 asks for SSE *with auth*, and a stream is where an auth bug is
+    // easiest to miss — the connection opens, the first frame arrives, and
+    // nothing distinguishes an anonymous reader from a signed-in one unless
+    // the check happens before `streamSSE` takes over the response.
+    const user = await getUser(c)
+    if (!user) return c.json({ error: 'unauthorized' }, 401)
 
     const nParam = c.req.query('n')
     if (nParam !== undefined && !POSITIVE_INTEGER.test(nParam)) {

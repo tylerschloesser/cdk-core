@@ -26,10 +26,13 @@ function Callback() {
     // must run once on mount is exactly what effects are for.
     let cancelled = false
     handleCallback()
-      .then(() => {
+      .then((returnTo) => {
         if (cancelled) return
-        // Land back on the pre-login path without a server round trip.
-        history.replaceState(null, '', '/')
+        // Land back on the pre-login path without a server round trip. The
+        // path comes from `handleCallback`, which read it out of the
+        // sessionStorage entry `login()` wrote — the query string here belongs
+        // to Cognito, not to the app, and must not survive.
+        history.replaceState(null, '', returnTo)
         setDone(true)
       })
       .catch((err: unknown) => {
@@ -113,6 +116,17 @@ function Home() {
     }
   }, [devName, refreshUser])
 
+  // In prod and preview this navigates to Cognito and never returns; the
+  // `catch` is for the configuration errors that happen before the redirect
+  // (no `auth` in `__config.json`), which would otherwise be a dead button.
+  const onLogin = useCallback(async () => {
+    try {
+      await login()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
+
   const onLogout = useCallback(async () => {
     try {
       logout()
@@ -192,6 +206,14 @@ function Home() {
             />
             <button data-testid="dev-login" onClick={() => void onDevLogin()}>
               dev login
+            </button>
+          </p>
+        )}
+
+        {config && config.mode !== 'local' && config.auth && (
+          <p>
+            <button data-testid="login" onClick={() => void onLogin()}>
+              sign in with Google
             </button>
           </p>
         )}

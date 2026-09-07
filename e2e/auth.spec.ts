@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, TARGET } from './fixtures.js'
 
 test('a fresh page is anonymous', async ({ page }) => {
   await page.goto('/')
@@ -10,11 +10,11 @@ test('a fresh page is anonymous', async ({ page }) => {
   await expect(page.getByTestId('user')).toHaveText('anonymous')
 })
 
-// `dev:` tokens only exist when the backend runs with AUTH=local. Cognito /
-// machine auth against a deployed preview is Epoch 4 — replace this skip with
-// a machine-auth fixture then, don't delete these tests.
+// The dev-login box only renders in `mode: 'local'`, because `dev:` tokens
+// are only trusted by a backend running with `AUTH=local`. Everywhere else the
+// same round trip is proven by the machine-auth fixture below.
 test.describe(() => {
-  test.skip(!!process.env.PLAYWRIGHT_BASE_URL, 'dev login is local-mode only; preview auth lands in Epoch 4')
+  test.skip(TARGET !== 'local', 'the dev-login box only exists in local mode')
 
   test('dev login round-trips through localStorage, and logout clears it', async ({ page }) => {
     await page.goto('/')
@@ -42,5 +42,39 @@ test.describe(() => {
     // user should still read as logged in on the other side.
     await page.reload()
     await expect(page.getByTestId('user')).toHaveText('alice@local')
+  })
+})
+
+// Local and preview run the identical assertion: the fixture seeds
+// `dev:claude` in one and a real Cognito token in the other, and the app
+// renders 'claude@local' or 'claude@<site>'. No branching — the fixture is
+// where the difference lives (plan.md D6). Production is skipped because it
+// has no machine user at all, which is the point of A7.
+// The skip is at *declaration* scope, not inside the body: Playwright resolves
+// a test's fixtures before it runs the body, so an in-body `test.skip` comes
+// too late — `machineAuth` would already have thrown. Same below.
+test.describe(() => {
+  test.skip(TARGET === 'prod', 'production has no machine user — that is A7, not a gap')
+
+  test('a machine-authed page reads back the signed-in user', async ({ authedPage, machineAuth }) => {
+    await authedPage.goto('/')
+
+    await expect(authedPage.getByTestId('user')).toHaveText(machineAuth.email)
+  })
+})
+
+// Preview-only: this is the assertion that proves the two Cognito pools are
+// actually isolated. A preview token sent to *production* must be rejected —
+// it is signed by a different issuer than the prod verifier trusts, so no
+// flag or config anywhere makes it work. `request` (not the page) so the
+// call never goes through the preview's own origin.
+test.describe(() => {
+  test.skip(TARGET !== 'preview', 'needs a preview token and a live production API')
+
+  test('a preview token is rejected by production', async ({ machineAuth, request }) => {
+    const res = await request.get('https://cdk-core.ty.ler.dev/api/me', {
+      headers: { 'x-id-token': machineAuth.idToken },
+    })
+    expect(res.status()).toBe(401)
   })
 })

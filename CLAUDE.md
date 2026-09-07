@@ -1,7 +1,7 @@
 # cdk-core
 
 Shared CDK constructs (`@tylerschloesser/cdk-core`), a Claude Code plugin of skills, and a
-reference site (`cdk-core.ty.ler.dev`) that dogfoods PR previews on this repo. **`plan.md` is
+reference site (`cdk-core.ty.ler.dev`) that dogfoods PR previews and Google auth on this repo. **`plan.md` is
 the spec** — its Status block says what exists today; `docs/prior-art.md` says where the
 patterns came from. This file holds only what must stay true.
 
@@ -35,7 +35,9 @@ survives, so anything the next session must know goes in those files before you 
 - **`pnpm verify`, `pnpm dev` and `pnpm e2e` never touch AWS or need credentials.** That
   property is what lets a session verify its own work before opening a PR. Keep it. `verify`
   is lint + typecheck + unit tests + build; `e2e` is the browser suite and is deliberately
-  *not* inside it (`pnpm --filter e2e exec playwright install chromium` once per clone).
+  *not* inside it (`pnpm --filter e2e exec playwright install chromium` once per clone). Only
+  `pnpm e2e` **with `PLAYWRIGHT_BASE_URL` set to a preview** needs credentials, to mint a
+  machine token; local and production runs still need none.
 - **The GitHub repo is public.** Nothing secret goes in a tracked file — and the account id
   and zone ids already in this file and `plan.md` are world-readable, so do not add more
   account detail without asking.
@@ -45,6 +47,10 @@ survives, so anything the next session must know goes in those files before you 
 - Dependency versions live in the `catalog:` block of `pnpm-workspace.yaml`; manifests say
   `"catalog:"`. `erasableSyntaxOnly` + `verbatimModuleSyntax`: no `enum`, no constructor
   parameter properties, `import type`. No formatter; no semicolons; single quotes.
+- **Prod has no password path and that is load-bearing** (A7): the prod pool has no native
+  users and its app client's `ExplicitAuthFlows` is `['ALLOW_REFRESH_TOKEN_AUTH']`, pinned on
+  the L1 because CDK's L2 cannot express it. Never add a native user or an auth flow to the
+  prod pool. `.claude/rules/auth.md` has the rest.
 - Rule files in `.claude/rules/` load when you read matching paths; read the relevant one
   **before** planning, not after your first file read. Keep this file under 100 lines and
   each rule under about 120.
