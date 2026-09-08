@@ -74,6 +74,10 @@ That form checks five `event: tick` frames arrive with real inter-arrival spread
 2000 ms across five, 500 ms between the first two) rather than buffered into one write. See
 the `preview-auth` skill for where the token comes from.
 
+This section assumes a site **without** `auth.gate` — which this repo is. On a gated consumer
+an `x-id-token` header is refused at the edge and the unauthenticated checks above answer
+**302**, not 401 or 200; `preview-auth` opens with the table of what changes.
+
 Then run the e2e suite against the preview:
 
 ```

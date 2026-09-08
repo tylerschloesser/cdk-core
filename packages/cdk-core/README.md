@@ -58,7 +58,7 @@ Google as the only identity provider. Key props: `domain`/`zone`, `certificate`,
 { functionUrl }`), `auth?: AuthProps`, `distributionOverrides?` and `additionalBehaviors?` as
 escape hatches. Exposes `distribution`, `bucket`, `url`, `userPool?`, `userPoolClient?` and
 `authEnvironment` (the `AUTH`/`AUTH_ISSUER`/`AUTH_CLIENT_ID` env to spread onto your backend
-Lambdas, or `{}` when `auth` is omitted).
+Lambdas — plus `AUTH_SESSION_SECRET` when `auth.gate` is set — or `{}` when `auth` is omitted).
 
 ```ts
 import { Stack } from 'aws-cdk-lib'
@@ -122,6 +122,43 @@ KVS and bucket. Props: `repo`, `roleName`, `stackPrefix`, `domain`, and optional
 `repo:<owner>@<ownerId>/<name>@<repoId>:…` subject alongside the legacy name-based one, which
 matters if the repo is ever renamed or transferred). Imports the account's existing GitHub OIDC
 provider rather than creating one.
+
+## `auth.gate: 'edge'` — the whole site behind Google
+
+By default `auth` gives you a Cognito pool and a token your app sends in `x-id-token`: the
+static site and every asset stay **public**, and a plain browser navigation carries no
+credential at all. Set `gate: 'edge'` and nothing reaches an origin without a valid session —
+not the SPA shell, not `__config.json`, not a hashed asset, not `/api/*`.
+
+```ts
+auth: { domainPrefix: 'example', gate: 'edge' }
+```
+
+It is a CloudFront Function checking an HMAC-signed `__Host-cdkcore-session` cookie, spliced
+into the functions `Site` and `PreviewSite` already create. A viewer-request function runs
+**before cache lookup**, so the edge cache keeps working exactly as it did — which is the one
+thing an origin-side check could not have offered.
+
+What it adds, all of it automatic: a Secrets Manager session secret per environment (prod and
+preview get **different** ones), a `KeyValueStore` for `Site` to read that secret from
+(CloudFront Functions have no environment variables), a `/auth/*` behavior on both
+distributions backed by a small package-owned Lambda that does the code→token exchange, and
+`AUTH_SESSION_SECRET` alongside `AUTH`/`AUTH_ISSUER`/`AUTH_CLIENT_ID` in `authEnvironment`.
+`auth/server`'s `getUser` accepts either credential, so machine callers keep working unchanged.
+No new Cognito app client: the gate reuses the public `browser` client with PKCE.
+
+Three things to know before you turn it on:
+
+- **Deploy `<Prefix>Preview` before the first PR stack that uses it.** The PR stack's Lambdas
+  reference the session secret through a `{{resolve:secretsmanager:…}}` dynamic reference, and
+  the shared stack owns that secret — otherwise the PR stack rolls back with
+  `Secrets Manager can't find the specified secret` and nothing names the stack that owes it.
+- **There is no allowlist.** Gated means gated from people who will not sign in with Google, not
+  from any particular person. Add an email check in `getUser` *and* where the cookie is minted
+  if you need more.
+- **Anything that polled an endpoint anonymously now gets a 302**, including CI health checks.
+  `curl -f` does not fail on a redirect, so such a check will pass while checking nothing —
+  compare `%{http_code}` instead.
 
 ## Runtime subpath exports
 

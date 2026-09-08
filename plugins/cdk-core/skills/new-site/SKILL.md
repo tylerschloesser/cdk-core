@@ -25,9 +25,27 @@ Prod answers at `https://<domain>`. Previews answer at `https://pr-<n>.preview.<
 OAuth bounce host is `https://oauth.preview.<domain>`. All of it sits behind one ACM
 certificate in `us-east-1` with SANs `[<domain>, *.preview.<domain>]`.
 
+### Optional: put the whole site behind Google
+
+By default the static site is **public** and auth is a token your app sends on API calls. Adding
+`gate: 'edge'` to `auth` in `bin/app.ts` means nothing reaches an origin without a session — not
+the shell, not an asset, not `/api/*`. It is a CloudFront Function checking an HMAC cookie,
+running *before* cache lookup, so the edge cache is unaffected. See the package README and
+`.claude/rules/edge-gate.md`.
+
+Three consequences to plan for at onboarding rather than discover:
+
+1. It adds a `/auth/*` Lambda and behavior on both distributions, a session secret per
+   environment, and a `KeyValueStore` for the prod site. Two more Secrets Manager secrets.
+2. **`<Prefix>Preview` must be deployed before the first PR stack that uses the gate**, because
+   the PR stack's Lambdas resolve the preview session secret the shared stack owns. Otherwise
+   the PR stack rolls back on `Secrets Manager can't find the specified secret`.
+3. Any anonymous CI poll (a health check) now gets a **302**. `curl -f` does not fail on a
+   redirect, so such a step passes while checking nothing — compare `%{http_code}`.
+
 Idle cost is pennies: two CloudFront distributions, two S3 buckets, one KeyValueStore, one
 CloudFront Function, two Cognito pools (10,000 MAU free tier is per account, not per pool),
-and up to three Secrets Manager secrets at $0.40/month each. Real money is spent only by a
+and up to three Secrets Manager secrets at $0.40/month each (five with the gate). Real money is spent only by a
 leaked PR stack taking traffic, or a runaway stream — see `plan.md`'s Cost guardrails.
 
 ## 2. The CDK app

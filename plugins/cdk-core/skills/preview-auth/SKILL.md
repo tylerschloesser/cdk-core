@@ -20,6 +20,32 @@ the production verifier only trusts its own pool. That 401 is itself an assertio
 suite (`e2e/auth.spec.ts`'s "a preview token is rejected by production" test) — it is the
 proof that the two pools are actually isolated, not just separate.
 
+## First: is the site gated?
+
+Everything below describes a site **without** `auth.gate` — the default, and what
+`cdk-core.ty.ler.dev` itself runs. If the consumer's `bin/app.ts` has `auth: { …, gate: 'edge' }`,
+three things in this skill change and the rest still holds. Check before you start; the symptom
+of getting it wrong is a `302` or a `401` from a `curl` that looks like a broken token.
+
+| | ungated (default) | `gate: 'edge'` |
+| --- | --- | --- |
+| credential on the wire | `x-id-token` header | `__Host-cdkcore-session` cookie |
+| `preview-login.sh` prints | a fresh ID token | a **cookie jar path**, and `<pr>` is required |
+| `curl` | `-H "x-id-token: $(…)"` | `-b "$(scripts/preview-login.sh <pr>)"` |
+| Playwright | `addInitScript` seeds `localStorage` | `context.request.get('/auth/session')` first |
+
+Why: with the gate, a request carrying only `x-id-token` is refused **at the edge**, before it
+reaches any Lambda — `/auth/*` is the one ungated path. So the ID token below is still exactly
+what you mint, it just has one more hop: `GET /auth/session` with the token in `x-id-token`
+returns `204` and a `Set-Cookie`, and everything after that is the cookie.
+
+`page.addInitScript` cannot work against a gated target at all, and this is worth understanding
+rather than working around: an init script only runs once a page has loaded, and a gated
+navigation never reaches a page. Use an `APIRequestContext` taken **from the browser context**
+(`page.context().request`), never `request.newContext()` — only the context-bound one shares the
+cookie jar the later `page.goto()` reads, and the standalone form fails as a redirect loop that
+names nothing.
+
 ## The secret
 
 Each site's machine-user credentials live in Secrets Manager at
