@@ -27,7 +27,7 @@ import type { Environment, StackProps } from 'aws-cdk-lib'
 import type * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import * as route53 from 'aws-cdk-lib/aws-route53'
-import type { Construct } from 'constructs'
+import type { Construct, IDependable } from 'constructs'
 
 import { siteCertificate } from './certificate.js'
 import { GithubDeployRole } from './github-deploy-role.js'
@@ -143,11 +143,21 @@ export interface SiteStacks {
 function applyAuthEnvironment(
   functions: Record<string, lambda.Function>,
   environment: AuthEnvironment | Record<string, never>,
+  /**
+   * The session secret, when the site is gated and owns it. `AUTH_SESSION_SECRET`
+   * is a `{{resolve:secretsmanager:...}}` dynamic reference, and a dynamic
+   * reference creates **no** implicit dependency — CloudFormation is free to
+   * create a backend Lambda before the secret exists, and the resolve then fails
+   * the deploy. Only prod passes this: a PR stack's secret lives in the shared
+   * preview stack, which is always deployed first.
+   */
+  dependsOn?: IDependable,
 ): void {
   for (const fn of Object.values(functions)) {
     for (const [key, value] of Object.entries(environment)) {
       fn.addEnvironment(key, value)
     }
+    if (dependsOn) fn.node.addDependency(dependsOn)
   }
 }
 
@@ -227,7 +237,7 @@ export function defineSiteStacks(app: App, props: DefineSiteStacksProps): SiteSt
     ...props.siteOverrides,
     ...(props.auth ? { auth: stripPreview(props.auth) } : {}),
   })
-  applyAuthEnvironment(siteFunctions, siteConstruct.authEnvironment)
+  applyAuthEnvironment(siteFunctions, siteConstruct.authEnvironment, siteConstruct.sessionSecret)
   new CfnOutput(site, 'SiteUrl', { value: siteConstruct.url })
 
   // ---- <prefix>GithubOidc: by hand, once --------------------------------
@@ -268,6 +278,11 @@ export function defineSiteStacks(app: App, props: DefineSiteStacksProps): SiteSt
       webDist,
       backends: prUrls,
       auth: props.auth !== undefined,
+      // The PR stack cannot read a construct reference, so — like `auth` — the
+      // gate is stated rather than discovered. It only decides whether the
+      // backend Lambdas get `AUTH_SESSION_SECRET`; the gate itself lives on the
+      // shared preview distribution.
+      gate: props.auth?.gate === 'edge',
     })
     applyAuthEnvironment(prFunctions, previewDeployment.authEnvironment)
     new CfnOutput(pr, 'PreviewUrl', { value: previewDeployment.url })

@@ -350,6 +350,31 @@ runs), so backend path patterns are fixed per distribution; it cannot read the b
 no absolute time limit published, only a `ComputeUtilization` 0–100 metric; `Promise.all`
 over KVS reads is discouraged (memory) — use sequential `await`.
 
+**Revisited (Epoch 7, the edge gate).** D1's heading is about *routing*, and for routing it is
+still true. It was reopened when the whole site went behind Google auth at the edge, because
+gating is the case Lambda@Edge is usually reached for — it can verify a JWT, and a CloudFront
+Function cannot. It is still not needed, for reasons that are constraints rather than
+preferences:
+
+- A CloudFront Function's `crypto` module is `createHash`/`createHmac` only — no RSA, no
+  `createVerify` — and it has **no network access**, so it can neither verify a Cognito ID
+  token nor ask Cognito to. That rules out a JWT at the edge, so the gate checks an
+  **HMAC-signed session cookie** instead, which `createHmac` does handle.
+- There is **no CSPRNG**: `Math.random()` is seeded from the function's start time and `Date`
+  is frozen for the invocation. So `state` is *signed* rather than random, and the PKCE
+  verifier is derived from the KVS secret (`HMAC(secret, 'pkce|' + state body)`) rather than
+  generated.
+- The code→token exchange does need the network, so it lives in a Lambda behind an `/auth/*`
+  behavior — a **regional** Lambda with a function URL, not Lambda@Edge. It runs once per
+  sign-in, not once per request, which is the whole cost argument above: the per-request path
+  stays a $0.10/M CloudFront Function.
+- And the property that actually matters: a viewer-request function runs **before cache
+  lookup**, so gating costs the edge cache nothing. An origin-side check would have had to
+  disable caching to be enforceable.
+
+The prices above still decide it. A gate on Lambda@Edge would be $0.60/M plus duration on
+every request that misses cache, to buy a JWT check that the cookie makes unnecessary.
+
 **[revised, Epoch 2] Resolved — it signs, and the fallback is dead.** The open sub-question
 was whether an inline `{enabled, signingBehavior: always, signingProtocol: sigv4, originType:
 lambda}` against a function URL that is *not* a configured origin actually signs. It does.

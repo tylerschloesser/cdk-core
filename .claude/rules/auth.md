@@ -13,6 +13,12 @@ Loaded when you touch the auth helpers, the user-pool construct, or the site con
 distribution and router side is `.claude/rules/cdk.md`; the bounce host lives in the generated
 router there. The reasoning is `plan.md` D4–D6.
 
+**When `auth.gate` is `'edge'` the whole site sits behind Google and the browser holds no
+Cognito token at all — it holds an HMAC session cookie.** That mechanism is
+`.claude/rules/edge-gate.md`; this file stays the description of the *pools*. Both are true at
+once: the gate reuses the `browser` app client described here, and `getUser` still accepts an
+`x-id-token` from a machine caller.
+
 ## The shape
 
 | | prod (`Site.auth`) | preview (`PreviewSite.auth`) |
@@ -20,7 +26,8 @@ router there. The reasoning is `plan.md` D4–D6.
 | pool | `CdkCoreSite`, one per site | `CdkCorePreview`, one per site, shared by every PR |
 | hosted UI | `cdk-core.auth.us-east-1.amazoncognito.com` | `cdk-core-preview.auth.…` |
 | browser client | callback `https://<site>/auth/callback` | callback `https://oauth.preview.<site>/` |
-| `state` | `<nonce>` | `<nonce>.<pr>` |
+| `state` (SPA flow) | `<nonce>` | `<nonce>.<pr>` |
+| `state` (edge gate) | `<iat>.<hexsig>` | `<iat>.<hexsig>~<pr>` |
 | other clients | none | `machine`, password flow, no hosted UI |
 | native users | **none** | `claude`, password in Secrets Manager |
 
