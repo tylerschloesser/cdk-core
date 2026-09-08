@@ -1,12 +1,17 @@
 {
   "name": "cdk-core",
   "description": "Drive per-PR CloudFront preview environments, Cognito machine auth, and the four-stack CDK layout that @tylerschloesser/cdk-core builds.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Tyler Schloesser"
   },
   "homepage": "https://github.com/tylerschloesser/cdk-core",
   "repository": "https://github.com/tylerschloesser/cdk-core",
   "license": "MIT",
-  "keywords": ["aws-cdk", "cloudfront", "preview-environments", "cognito"]
+  "keywords": [
+    "aws-cdk",
+    "cloudfront",
+    "preview-environments",
+    "cognito"
+  ]
 }
