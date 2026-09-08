@@ -15,7 +15,16 @@
  * CloudFormation has no resource type for — and `applyPoolUser` is written
  * against the `PoolUserDirectory` interface for the same reason. One bundle
  * serves both because `PreviewSite` and `PreviewDeployment` would otherwise
- * ship two nearly identical Lambdas. An unknown `ResourceType` throws.
+ * ship two nearly identical Lambdas.
+ *
+ * [edge-gate] A third `ResourceType`, `KvsSecret`, copies a field out of a
+ * Secrets Manager secret into the KeyValueStore under a fixed key — the
+ * session-signing HMAC secret the edge gate's CloudFront Functions read with
+ * `kvs.get()`, since a CloudFront Function has no environment variables. It
+ * reuses `applyKvsRoute` verbatim (same store, same ETag-retry contract) and
+ * `readSecretField` (generalized from what `applyPoolUser` used as
+ * `readPassword`) to pull the field at runtime, never into the template. An
+ * unknown `ResourceType` throws.
  */
 
 import type {
@@ -145,6 +154,38 @@ export async function applyKvsRoute(
 }
 
 /**
+ * Reads a Secrets Manager secret's raw `SecretString`, keeping the SDK call
+ * apart from the JSON-field parsing below so the parsing can be tested
+ * against a fake.
+ */
+export interface SecretReader {
+  getSecretString(secretArn: string): Promise<string | undefined>
+}
+
+/**
+ * Reads one JSON field out of a Secrets Manager secret at *runtime*, so it
+ * never reaches the CloudFormation template, a change set, or a stack event.
+ * Shared by the `PoolUser` path (the machine user's password) and the
+ * `KvsSecret` path (the edge gate's session-signing secret) — one primitive,
+ * because both are "pull a field out of a secret" and nothing more.
+ */
+export async function readSecretField(
+  reader: SecretReader,
+  input: { secretArn: string; field: string },
+): Promise<string> {
+  const secretString = await reader.getSecretString(input.secretArn)
+  if (!secretString) {
+    throw new Error(`secret ${input.secretArn} has no SecretString`)
+  }
+  const parsed = JSON.parse(secretString) as Record<string, unknown>
+  const value = parsed[input.field]
+  if (typeof value !== 'string' || !value) {
+    throw new Error(`secret ${input.secretArn} has no string field ${input.field}`)
+  }
+  return value
+}
+
+/**
  * The Cognito admin calls the machine user needs, and the one Secrets Manager
  * read that feeds them. Named apart from the SDK so `applyPoolUser` can be
  * tested against a fake.
@@ -239,6 +280,56 @@ export async function applyPoolUser(
   return id
 }
 
+export interface KvsSecretRequest {
+  readonly operation: 'put' | 'delete'
+  readonly kvsArn: string
+  readonly key: string
+  readonly secretArn?: string
+  readonly secretKey?: string
+}
+
+/**
+ * Copies one JSON field of a Secrets Manager secret into the KeyValueStore
+ * under `key` — the edge gate's session-signing HMAC secret, read by a
+ * CloudFront Function via `kvs.get()` because such a function has no
+ * environment variables.
+ *
+ * Routes through `applyKvsRoute` exactly as `KvsRoute` does, so it inherits
+ * the same describe→`UpdateKeys` retry-as-a-unit on `ConflictException` /
+ * `ValidationException` and the same delete-of-missing-is-success behaviour.
+ * This is deliberately the only place that builds a `KvsRouteRequest` besides
+ * the `KvsRoute` path itself — there is exactly one KVS write code path.
+ */
+export async function applyKvsSecret(
+  store: KvsStore,
+  secrets: SecretReader,
+  request: KvsSecretRequest,
+  options: ApplyKvsRouteOptions = {},
+): Promise<string> {
+  if (request.operation === 'delete') {
+    return applyKvsRoute(
+      store,
+      { operation: 'delete', kvsArn: request.kvsArn, key: request.key },
+      options,
+    )
+  }
+
+  if (!request.secretArn || !request.secretKey) {
+    throw new Error('KvsSecret: SecretArn and SecretKey are required to put a value')
+  }
+
+  const value = await readSecretField(secrets, {
+    secretArn: request.secretArn,
+    field: request.secretKey,
+  })
+
+  return applyKvsRoute(
+    store,
+    { operation: 'put', kvsArn: request.kvsArn, key: request.key, value },
+    options,
+  )
+}
+
 interface KvsRouteResourceProperties {
   readonly ResourceType: 'KvsRoute'
   readonly KvsArn: string
@@ -255,7 +346,18 @@ interface PoolUserResourceProperties {
   readonly PasswordKey: string
 }
 
-type ResourceProperties = KvsRouteResourceProperties | PoolUserResourceProperties
+interface KvsSecretResourceProperties {
+  readonly ResourceType: 'KvsSecret'
+  readonly KvsArn: string
+  readonly Key: string
+  readonly SecretArn: string
+  readonly SecretKey: string
+}
+
+type ResourceProperties =
+  | KvsRouteResourceProperties
+  | PoolUserResourceProperties
+  | KvsSecretResourceProperties
 
 async function createKvsStore(): Promise<KvsStore> {
   // Imported lazily so `applyKvsRoute` — the piece the unit tests exercise —
@@ -291,6 +393,25 @@ async function createKvsStore(): Promise<KvsStore> {
   }
 }
 
+async function createSecretReader(): Promise<SecretReader> {
+  // Lazy, like `createKvsStore`: the pure half of this module is what the unit
+  // tests exercise, and it must not drag the AWS SDK into a vitest run.
+  const { SecretsManagerClient, GetSecretValueCommand } = await import(
+    '@aws-sdk/client-secrets-manager'
+  )
+
+  const secrets = new SecretsManagerClient({ region: 'us-east-1' })
+
+  return {
+    async getSecretString(secretArn) {
+      const response = await secrets.send(
+        new GetSecretValueCommand({ SecretId: secretArn }),
+      )
+      return response.SecretString
+    },
+  }
+}
+
 async function createPoolUserDirectory(): Promise<PoolUserDirectory> {
   // Lazy, like `createKvsStore`: the pure half of this module is what the unit
   // tests exercise, and it must not drag the AWS SDK into a vitest run.
@@ -300,12 +421,9 @@ async function createPoolUserDirectory(): Promise<PoolUserDirectory> {
     AdminSetUserPasswordCommand,
     AdminDeleteUserCommand,
   } = await import('@aws-sdk/client-cognito-identity-provider')
-  const { SecretsManagerClient, GetSecretValueCommand } = await import(
-    '@aws-sdk/client-secrets-manager'
-  )
 
   const cognito = new CognitoIdentityProviderClient({ region: 'us-east-1' })
-  const secrets = new SecretsManagerClient({ region: 'us-east-1' })
+  const secrets = await createSecretReader()
 
   return {
     async createUser({ userPoolId, username, email }) {
@@ -339,18 +457,7 @@ async function createPoolUserDirectory(): Promise<PoolUserDirectory> {
       )
     },
     async readPassword({ secretArn, passwordKey }) {
-      const response = await secrets.send(
-        new GetSecretValueCommand({ SecretId: secretArn }),
-      )
-      if (!response.SecretString) {
-        throw new Error(`secret ${secretArn} has no SecretString`)
-      }
-      const parsed = JSON.parse(response.SecretString) as Record<string, unknown>
-      const password = parsed[passwordKey]
-      if (typeof password !== 'string' || !password) {
-        throw new Error(`secret ${secretArn} has no string field ${passwordKey}`)
-      }
-      return password
+      return readSecretField(secrets, { secretArn, field: passwordKey })
     },
   }
 }
@@ -369,6 +476,19 @@ export const handler = async (
       email: properties.Email,
       secretArn: properties.SecretArn,
       passwordKey: properties.PasswordKey,
+    })
+    return { PhysicalResourceId }
+  }
+
+  if (properties.ResourceType === 'KvsSecret') {
+    const store = await createKvsStore()
+    const secrets = await createSecretReader()
+    const PhysicalResourceId = await applyKvsSecret(store, secrets, {
+      operation: event.RequestType === 'Delete' ? 'delete' : 'put',
+      kvsArn: properties.KvsArn,
+      key: properties.Key,
+      secretArn: properties.SecretArn,
+      secretKey: properties.SecretKey,
     })
     return { PhysicalResourceId }
   }

@@ -9,6 +9,7 @@
 import { App, Stack } from 'aws-cdk-lib'
 import { Template } from 'aws-cdk-lib/assertions'
 import * as acm from 'aws-cdk-lib/aws-certificatemanager'
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
 import * as route53 from 'aws-cdk-lib/aws-route53'
 import { describe, expect, it } from 'vitest'
 
@@ -17,21 +18,23 @@ import { PreviewSite } from '../src/preview-site.js'
 const DOMAIN = 'cdk-core.ty.ler.dev'
 
 /**
- * Memoised per `auth` value. Synthesizing this stack stages CDK's
- * provider-framework asset, which is the slowest thing in the whole vitest
- * suite; the tests below only read the template, so one synth serves them all.
+ * Memoised per `auth`/`gate` combination. Synthesizing this stack stages
+ * CDK's provider-framework asset, which is the slowest thing in the whole
+ * vitest suite; the tests below only read the template, so one synth serves
+ * each combination.
  */
-const built = new Map<boolean, { site: PreviewSite; template: Template }>()
+const built = new Map<string, { site: PreviewSite; template: Template }>()
 
-function build(auth: boolean): { site: PreviewSite; template: Template } {
-  const cached = built.get(auth)
+function build(auth: boolean, gate = false): { site: PreviewSite; template: Template } {
+  const key = `${auth}:${gate}`
+  const cached = built.get(key)
   if (cached) return cached
-  const result = synth(auth)
-  built.set(auth, result)
+  const result = synth(auth, gate)
+  built.set(key, result)
   return result
 }
 
-function synth(auth: boolean): { site: PreviewSite; template: Template } {
+function synth(auth: boolean, gate: boolean): { site: PreviewSite; template: Template } {
   const app = new App()
   const stack = new Stack(app, 'Preview', {
     env: { account: '111122223333', region: 'us-east-1' },
@@ -53,7 +56,9 @@ function synth(auth: boolean): { site: PreviewSite; template: Template } {
       api: { pathPattern: '/api/*' },
       events: { pathPattern: '/events/*', streaming: true },
     },
-    ...(auth ? { auth: { domainPrefix: 'cdk-core-preview' } } : {}),
+    ...(auth
+      ? { auth: { domainPrefix: 'cdk-core-preview', ...(gate ? { gate: 'edge' as const } : {}) } }
+      : {}),
   })
   return { site, template: Template.fromStack(stack) }
 }
@@ -158,5 +163,103 @@ describe('PreviewSite auth', () => {
     template.resourceCountIs('Custom::CdkCorePoolUser', 0)
     expect(site.userPool).toBeUndefined()
     expect(site.machineUserSecret).toBeUndefined()
+  })
+})
+
+function distributionConfig(template: Template): Record<string, unknown> {
+  const dist = Object.values(
+    template.findResources('AWS::CloudFront::Distribution'),
+  )[0] as { Properties: { DistributionConfig: Record<string, unknown> } }
+  return dist.Properties.DistributionConfig
+}
+
+function findBehavior(
+  config: Record<string, unknown>,
+  pathPattern: string,
+): Record<string, unknown> | undefined {
+  const behaviors = config.CacheBehaviors as { PathPattern: string }[] | undefined
+  return behaviors?.find((b) => b.PathPattern === pathPattern)
+}
+
+function authLambdaEnvironment(template: Template): Record<string, unknown> {
+  const fns = Object.values(template.findResources('AWS::Lambda::Function')) as {
+    Properties: { Environment?: { Variables: Record<string, unknown> }; Description?: string }
+  }[]
+  const match = fns.find((fn) => fn.Properties.Description?.includes('preview auth endpoint'))
+  if (!match) throw new Error('no auth endpoint Lambda found')
+  return match.Properties.Environment!.Variables
+}
+
+describe('PreviewSite edge gate', () => {
+  it("adds a /auth/* behavior with caching disabled — the whole safety property, not a preference", () => {
+    const { template } = build(true, true)
+    const behavior = findBehavior(distributionConfig(template), '/auth/*')
+    expect(behavior).toBeDefined()
+    expect(behavior?.CachePolicyId).toBe(cloudfront.CachePolicy.CACHING_DISABLED.cachePolicyId)
+  })
+
+  it('gives /auth/* no FunctionAssociations, so the router can never mangle /auth/callback', () => {
+    const { template } = build(true, true)
+    const behavior = findBehavior(distributionConfig(template), '/auth/*')
+    expect(behavior).not.toHaveProperty('FunctionAssociations')
+  })
+
+  it('leaves the default behavior and every backend behavior with exactly one viewer-request association', () => {
+    const { template } = build(true, true)
+    const config = distributionConfig(template)
+    const behaviors = [
+      config.DefaultCacheBehavior as Record<string, unknown>,
+      findBehavior(config, '/api/*')!,
+      findBehavior(config, '/events/*')!,
+    ]
+    for (const behavior of behaviors) {
+      expect(behavior.FunctionAssociations).toHaveLength(1)
+      expect((behavior.FunctionAssociations as { EventType: string }[])[0]?.EventType).toBe(
+        'viewer-request',
+      )
+    }
+  })
+
+  it('is still one CloudFront Function — the gate is spliced into the router, not added beside it', () => {
+    const { template } = build(true, true)
+    template.resourceCountIs('AWS::CloudFront::Function', 1)
+  })
+
+  it('copies the session secret into the KVS and keeps the router associated with its store', () => {
+    const { template } = build(true, true)
+    template.resourceCountIs('Custom::CdkCoreKvsSecret', 1)
+    const fns = Object.values(template.findResources('AWS::CloudFront::Function')) as {
+      Properties: { FunctionConfig: { KeyValueStoreAssociations?: unknown[] } }
+    }[]
+    expect(fns[0]?.Properties.FunctionConfig.KeyValueStoreAssociations).toHaveLength(1)
+  })
+
+  it("gives the auth Lambda both client ids and a session secret dynamic reference", () => {
+    const { template } = build(true, true)
+    const env = authLambdaEnvironment(template)
+    // aud is the client that minted the token, not the pool — exactly like
+    // `PreviewDeployment.authEnvironment`.
+    expect(JSON.stringify(env.AUTH_CLIENT_ID)).toMatch(/PreviewAuthClient/)
+    expect(JSON.stringify(env.AUTH_CLIENT_ID)).toMatch(/PreviewMachineClient/)
+    // Rendered form, whatever shape it took (a plain string here, or an
+    // `Fn::Join` when a token like the partition is folded in elsewhere) —
+    // assert on the serialized form per `.claude/rules/auth.md` item 3.
+    expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain('{{resolve:secretsmanager:')
+    expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain(
+      `${DOMAIN}/preview-session-secret`,
+    )
+  })
+
+  it('adds none of the above when `gate` is omitted — the ungated path is untouched', () => {
+    const { template, site } = build(true, false)
+    const behavior = findBehavior(distributionConfig(template), '/auth/*')
+    expect(behavior).toBeUndefined()
+    template.resourceCountIs('Custom::CdkCoreKvsSecret', 0)
+    const fns = Object.values(template.findResources('AWS::CloudFront::Function')) as {
+      Properties: { FunctionCode: string }
+    }[]
+    expect(fns).toHaveLength(1)
+    expect(fns[0]?.Properties.FunctionCode).not.toContain('function gate(')
+    expect(site.userPoolClient).toBeDefined()
   })
 })

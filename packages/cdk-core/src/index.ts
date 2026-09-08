@@ -23,6 +23,9 @@ export type { SiteCertificateProps } from './certificate.js'
 export { PreviewSite, previewParameterPrefix } from './preview-site.js'
 export type { PreviewSiteProps } from './preview-site.js'
 
+export { KvsSecret } from './kvs-secret.js'
+export type { KvsSecretProps } from './kvs-secret.js'
+
 export { PreviewDeployment } from './preview-deployment.js'
 export type { PreviewDeploymentProps } from './preview-deployment.js'
 

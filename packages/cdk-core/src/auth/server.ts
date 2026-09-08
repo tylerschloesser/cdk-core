@@ -7,12 +7,22 @@
  * every backend Lambda (`AUTH=cognito` plus `AUTH_ISSUER`/`AUTH_CLIENT_ID`) and
  * `pnpm dev` sets to `local`. There is no default that trusts anything: an
  * unset `AUTH` is `none`, and `getUser` returns `null`.
+ *
+ * There are two credentials `getUser` will accept, tried in that order:
+ * an `x-id-token` header (a Cognito ID token, presented by machine callers —
+ * the e2e fixture, `scripts/preview-login.sh`) and, in `cognito` mode only,
+ * the `__Host-cdkcore-session` cookie a CloudFront Function sets at the edge
+ * after Google sign-in. The cookie is HMAC-signed with `AUTH_SESSION_SECRET`,
+ * a secret shared with the edge (see `auth/session.ts`), and the origin
+ * re-verifies it rather than trusting anything the edge claims.
  */
 
 import { CognitoJwtVerifier } from 'aws-jwt-verify'
 import { ID_TOKEN_HEADER } from '../config.js'
+import { SESSION_COOKIE, parseCookieHeader, verifySession } from './session.js'
 
 export { ID_TOKEN_HEADER } from '../config.js'
+export { SESSION_COOKIE } from './session.js'
 
 export type AuthMode = 'none' | 'local' | 'cognito'
 
@@ -130,17 +140,21 @@ function getCachedVerifier(config: VerifierConfig): Verifier {
  * no expiry, no network. That is safe because the only way `AUTH=local` is set
  * is `pnpm dev` on a laptop: the constructs never emit it, and Epoch 4's
  * acceptance test asserts the deployed prod client has no password flow at all.
+ *
+ * The mode is decided first, then the `x-id-token` header is tried, then (in
+ * `cognito` mode only) the session cookie — never the other order, or a
+ * cookie-only browser caller would never get past a header check.
  */
 export async function getUser(c: RequestLike): Promise<AuthUser | null> {
-  const token = c.req.header(ID_TOKEN_HEADER)
-  if (!token) return null
+  const mode = authMode()
+  if (mode === 'none') return null
 
-  switch (authMode()) {
-    case 'none':
-      return null
-    case 'local':
-      return parseDevToken(token)
-    case 'cognito': {
+  const token = c.req.header(ID_TOKEN_HEADER)
+  if (token) {
+    if (mode === 'local') {
+      const user = parseDevToken(token)
+      if (user) return user
+    } else {
       const issuer = process.env.AUTH_ISSUER
       const clientId = process.env.AUTH_CLIENT_ID
       if (!issuer || !clientId) {
@@ -154,15 +168,35 @@ export async function getUser(c: RequestLike): Promise<AuthUser | null> {
         return await verifier.verify(token)
       } catch {
         // An invalid token — expired, wrong signature, or (the case that
-        // matters) issued by a *different* pool — is an anonymous caller as
-        // far as a route is concerned: null, not a throw. The negative case
-        // is the interesting one: a preview-pool token presented to the prod
-        // API must come back null here because its `iss` does not match the
-        // prod pool this verifier was built for (D4).
-        return null
+        // matters) issued by a *different* pool — falls through to the
+        // cookie below rather than short-circuiting to null: a caller
+        // presenting `x-id-token` means it (a machine caller must not be
+        // silently reinterpreted as someone else), but a browser carrying a
+        // stale header alongside a good cookie is still a signed-in user.
+        // The negative case is the interesting one: a preview-pool token
+        // presented to the prod API must come back null here because its
+        // `iss` does not match the prod pool this verifier was built for
+        // (D4) — and prod has no session cookie to fall back to either.
       }
     }
   }
+
+  // The cookie path only exists in `cognito` mode, and only when the edge
+  // gate's shared secret is configured. A site with `AUTH=cognito` but no
+  // CloudFront Function gate in front of it has no `AUTH_SESSION_SECRET` at
+  // all — that is the normal shape of an ungated site, not a deployment bug,
+  // so (unlike the ISSUER/CLIENT_ID check above) a missing secret does not
+  // throw; it just means there is no cookie credential to try.
+  if (mode === 'cognito') {
+    const secret = process.env.AUTH_SESSION_SECRET
+    if (secret) {
+      const cookies = parseCookieHeader(c.req.header('cookie'))
+      const payload = verifySession(cookies[SESSION_COOKIE], secret)
+      if (payload) return { sub: payload.sub, email: payload.email }
+    }
+  }
+
+  return null
 }
 
 /** `dev:<name>` → a stable fake user. Exported for tests. */

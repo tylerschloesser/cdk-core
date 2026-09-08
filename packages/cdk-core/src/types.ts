@@ -60,6 +60,16 @@ export interface AuthProps {
   readonly refreshTokenValidity?: Duration
   /** Escape hatch applied to the `UserPool` props. */
   readonly userPoolOverrides?: Partial<cognito.UserPoolProps>
+  /**
+   * When set, the whole site is gated at the CloudFront edge: a request with
+   * no valid session cookie never reaches an origin. The constructs create
+   * the session secret, the KVS entry it is copied into, the `/auth/*`
+   * Lambda behavior, and attach the gate to every CloudFront Function.
+   *
+   * A string union rather than a boolean so an origin-side variant could be
+   * added later without a breaking change.
+   */
+  readonly gate?: 'edge'
 }
 
 /** Env vars the constructs put on a backend Lambda so `auth/server` can verify tokens. */
@@ -79,4 +89,12 @@ export interface AuthEnvironment {
    * its issuer is a different pool entirely.
    */
   readonly AUTH_CLIENT_ID: string
+  /**
+   * Present only when `AuthProps.gate` is set. The HMAC secret the origin
+   * uses to re-verify the session cookie the edge gate checks, delivered as a
+   * `{{resolve:secretsmanager:…}}` dynamic reference so it never appears in
+   * the template. Optional because an ungated site has no such secret, and
+   * `auth/server` treats its absence as "no gate", not as a deployment bug.
+   */
+  readonly AUTH_SESSION_SECRET?: string
 }

@@ -1,6 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyKvsRoute, applyPoolUser } from '../src/handlers/preview-resources.js'
-import type { KvsStore, PoolUserDirectory } from '../src/handlers/preview-resources.js'
+import {
+  applyKvsRoute,
+  applyKvsSecret,
+  applyPoolUser,
+  handler,
+  readSecretField,
+} from '../src/handlers/preview-resources.js'
+import type {
+  KvsStore,
+  PoolUserDirectory,
+  SecretReader,
+} from '../src/handlers/preview-resources.js'
 
 const KVS_ARN = 'arn:aws:cloudfront::063257577013:key-value-store/test'
 
@@ -481,5 +491,251 @@ describe('applyPoolUser', () => {
 
     expect(upsertId).toBe(`pooluser:${USER_POOL_ID}#preview-bot`)
     expect(upsertId).toBe(deleteId)
+  })
+})
+
+const SESSION_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:063257577013:secret:session-abc123'
+
+function fakeSecretReader(overrides: Partial<SecretReader> = {}): SecretReader {
+  return {
+    getSecretString: vi.fn(async () => '{"hmacKey":"super-secret-value"}'),
+    ...overrides,
+  }
+}
+
+describe('readSecretField', () => {
+  it('reads the named field out of the secret JSON', async () => {
+    const reader = fakeSecretReader()
+
+    const value = await readSecretField(reader, {
+      secretArn: SESSION_SECRET_ARN,
+      field: 'hmacKey',
+    })
+
+    expect(value).toBe('super-secret-value')
+  })
+
+  it('fails, naming the secret, when there is no SecretString', async () => {
+    const reader = fakeSecretReader({ getSecretString: vi.fn(async () => undefined) })
+
+    await expect(
+      readSecretField(reader, { secretArn: SESSION_SECRET_ARN, field: 'hmacKey' }),
+    ).rejects.toThrow(new RegExp(`${SESSION_SECRET_ARN}.*SecretString`))
+  })
+
+  it('fails, naming the secret and the field, when the field is missing', async () => {
+    const reader = fakeSecretReader({
+      getSecretString: vi.fn(async () => '{"other":"value"}'),
+    })
+
+    await expect(
+      readSecretField(reader, { secretArn: SESSION_SECRET_ARN, field: 'hmacKey' }),
+    ).rejects.toThrow(new RegExp(`${SESSION_SECRET_ARN}.*hmacKey`))
+  })
+
+  it('fails, naming the secret and the field, when the field is non-string', async () => {
+    const reader = fakeSecretReader({
+      getSecretString: vi.fn(async () => '{"hmacKey":12345}'),
+    })
+
+    await expect(
+      readSecretField(reader, { secretArn: SESSION_SECRET_ARN, field: 'hmacKey' }),
+    ).rejects.toThrow(new RegExp(`${SESSION_SECRET_ARN}.*hmacKey`))
+  })
+})
+
+describe('applyKvsSecret', () => {
+  it('on put, reads the named field and writes it into the KVS under Key, using the ETag from describe', async () => {
+    const describe = vi.fn(async () => ({ etag: 'etag-abc' }))
+    const updateKeys = vi.fn(async () => undefined)
+    const store = fakeStore({ describe, updateKeys })
+    const reader = fakeSecretReader()
+
+    const id = await applyKvsSecret(
+      store,
+      reader,
+      {
+        operation: 'put',
+        kvsArn: KVS_ARN,
+        key: 'session-secret',
+        secretArn: SESSION_SECRET_ARN,
+        secretKey: 'hmacKey',
+      },
+      { sleep: noSleep },
+    )
+
+    expect(reader.getSecretString).toHaveBeenCalledWith(SESSION_SECRET_ARN)
+    expect(updateKeys).toHaveBeenCalledWith({
+      kvsArn: KVS_ARN,
+      ifMatch: 'etag-abc',
+      puts: [{ key: 'session-secret', value: 'super-secret-value' }],
+    })
+    expect(id).toBe(`kvsroute:${KVS_ARN}#session-secret`)
+  })
+
+  it('on delete, removes the key without touching the secret reader', async () => {
+    const describe = vi.fn(async () => ({ etag: 'etag-abc' }))
+    const updateKeys = vi.fn(async () => undefined)
+    const store = fakeStore({ describe, updateKeys })
+    const reader = fakeSecretReader()
+
+    const id = await applyKvsSecret(
+      store,
+      reader,
+      { operation: 'delete', kvsArn: KVS_ARN, key: 'session-secret' },
+      { sleep: noSleep },
+    )
+
+    expect(reader.getSecretString).not.toHaveBeenCalled()
+    expect(updateKeys).toHaveBeenCalledWith({
+      kvsArn: KVS_ARN,
+      ifMatch: 'etag-abc',
+      deletes: [{ key: 'session-secret' }],
+    })
+    expect(id).toBe(`kvsroute:${KVS_ARN}#session-secret`)
+  })
+
+  it('treats a delete of a key that is not there as success', async () => {
+    const describe = vi.fn(async () => ({ etag: 'etag-x' }))
+    const updateKeys = vi.fn().mockRejectedValueOnce(notFoundError())
+    const store = fakeStore({ describe, updateKeys })
+    const reader = fakeSecretReader()
+
+    const id = await applyKvsSecret(
+      store,
+      reader,
+      { operation: 'delete', kvsArn: KVS_ARN, key: 'session-secret' },
+      { sleep: noSleep },
+    )
+
+    expect(id).toBe(`kvsroute:${KVS_ARN}#session-secret`)
+    expect(updateKeys).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails, naming the secret and the field, when the secret has no SecretString', async () => {
+    const store = fakeStore()
+    const reader = fakeSecretReader({ getSecretString: vi.fn(async () => undefined) })
+
+    await expect(
+      applyKvsSecret(
+        store,
+        reader,
+        {
+          operation: 'put',
+          kvsArn: KVS_ARN,
+          key: 'session-secret',
+          secretArn: SESSION_SECRET_ARN,
+          secretKey: 'hmacKey',
+        },
+        { sleep: noSleep },
+      ),
+    ).rejects.toThrow(new RegExp(`${SESSION_SECRET_ARN}.*SecretString`))
+    expect(store.updateKeys).not.toHaveBeenCalled()
+  })
+
+  it('fails, naming the secret and the field, when the named field is missing or non-string', async () => {
+    const store = fakeStore()
+
+    const missing = fakeSecretReader({
+      getSecretString: vi.fn(async () => '{"other":"value"}'),
+    })
+    await expect(
+      applyKvsSecret(
+        store,
+        missing,
+        {
+          operation: 'put',
+          kvsArn: KVS_ARN,
+          key: 'session-secret',
+          secretArn: SESSION_SECRET_ARN,
+          secretKey: 'hmacKey',
+        },
+        { sleep: noSleep },
+      ),
+    ).rejects.toThrow(new RegExp(`${SESSION_SECRET_ARN}.*hmacKey`))
+
+    const nonString = fakeSecretReader({
+      getSecretString: vi.fn(async () => '{"hmacKey":12345}'),
+    })
+    await expect(
+      applyKvsSecret(
+        store,
+        nonString,
+        {
+          operation: 'put',
+          kvsArn: KVS_ARN,
+          key: 'session-secret',
+          secretArn: SESSION_SECRET_ARN,
+          secretKey: 'hmacKey',
+        },
+        { sleep: noSleep },
+      ),
+    ).rejects.toThrow(new RegExp(`${SESSION_SECRET_ARN}.*hmacKey`))
+
+    expect(store.updateKeys).not.toHaveBeenCalled()
+  })
+
+  it('retries a write that fails once with ValidationException then succeeds — the shared applyKvsRoute path', async () => {
+    let call = 0
+    const describe = vi.fn(async () => {
+      call += 1
+      return { etag: `etag-${call}` }
+    })
+    const updateKeys = vi
+      .fn()
+      .mockRejectedValueOnce(validationError())
+      .mockResolvedValueOnce(undefined)
+    const store = fakeStore({ describe, updateKeys })
+    const reader = fakeSecretReader()
+
+    const id = await applyKvsSecret(
+      store,
+      reader,
+      {
+        operation: 'put',
+        kvsArn: KVS_ARN,
+        key: 'session-secret',
+        secretArn: SESSION_SECRET_ARN,
+        secretKey: 'hmacKey',
+      },
+      { sleep: noSleep },
+    )
+
+    expect(id).toBe(`kvsroute:${KVS_ARN}#session-secret`)
+    expect(describe).toHaveBeenCalledTimes(2)
+    expect(updateKeys).toHaveBeenCalledTimes(2)
+    expect(updateKeys).toHaveBeenNthCalledWith(1, expect.objectContaining({ ifMatch: 'etag-1' }))
+    expect(updateKeys).toHaveBeenNthCalledWith(2, expect.objectContaining({ ifMatch: 'etag-2' }))
+  })
+
+  it('throws before reading the secret when secretArn/secretKey are missing on put', async () => {
+    const store = fakeStore()
+    const reader = fakeSecretReader()
+
+    await expect(
+      applyKvsSecret(
+        store,
+        reader,
+        { operation: 'put', kvsArn: KVS_ARN, key: 'session-secret' },
+        { sleep: noSleep },
+      ),
+    ).rejects.toThrow('SecretArn and SecretKey are required')
+
+    expect(reader.getSecretString).not.toHaveBeenCalled()
+    expect(store.describe).not.toHaveBeenCalled()
+  })
+})
+
+describe('handler', () => {
+  it('throws on an unknown ResourceType', async () => {
+    const event = {
+      RequestType: 'Create',
+      ResourceProperties: { ResourceType: 'SomethingElse' },
+      // The remaining CloudFormation custom-resource-event fields are
+      // untouched by `handler` before the unknown-type throw fires, so they
+      // are omitted here.
+    } as unknown as Parameters<typeof handler>[0]
+
+    await expect(handler(event)).rejects.toThrow(/unknown ResourceType/)
   })
 })

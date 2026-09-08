@@ -293,6 +293,73 @@ describe('defineSiteStacks', () => {
       }
     })
 
+    it('puts AUTH_SESSION_SECRET on every backend function in both stacks when the gate is on', () => {
+      const { templates } = scenario('gated', () => {
+        const app = new App({ context: { pr: '42' } })
+        return {
+          app,
+          result: defineSiteStacks(
+            app,
+            baseProps({
+              auth: {
+                domainPrefix: 'cdk-core',
+                gate: 'edge',
+                preview: { domainPrefix: 'cdk-core-preview' },
+              },
+            }),
+          ),
+        }
+      })
+
+      for (const env of Object.values(environmentsByFunctionPrefix(templates.site, ['ApiFn', 'EventsFn']))) {
+        expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain('{{resolve:secretsmanager:')
+        expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain(`${DOMAIN}/session-secret`)
+      }
+
+      // The PR stack reads the *preview* secret, which lives in the shared
+      // preview stack — a different secret from prod's, which is what makes a
+      // preview session cookie useless against production.
+      for (const env of Object.values(environmentsByFunctionPrefix(templates.pr!, ['ApiFn', 'EventsFn']))) {
+        expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain(`${DOMAIN}/preview-session-secret`)
+      }
+    })
+
+    it('makes each prod backend function depend on the session secret', () => {
+      // `AUTH_SESSION_SECRET` is a `{{resolve:secretsmanager:...}}` dynamic
+      // reference, and a dynamic reference creates no implicit dependency.
+      // Without the explicit one, CloudFormation may create a backend Lambda
+      // before the secret exists and the resolve fails the deploy.
+      const { templates } = scenario('gated', () => {
+        const app = new App({ context: { pr: '42' } })
+        return {
+          app,
+          result: defineSiteStacks(
+            app,
+            baseProps({
+              auth: {
+                domainPrefix: 'cdk-core',
+                gate: 'edge',
+                preview: { domainPrefix: 'cdk-core-preview' },
+              },
+            }),
+          ),
+        }
+      })
+      const resources = templates.site.toJSON().Resources as Record<string, { Type: string; DependsOn?: string[] }>
+      const secretIds = Object.entries(resources)
+        .filter(([, r]) => r.Type === 'AWS::SecretsManager::Secret')
+        .map(([id]) => id)
+      expect(secretIds.length).toBeGreaterThan(0)
+
+      const backends = Object.entries(resources).filter(
+        ([id, r]) => r.Type === 'AWS::Lambda::Function' && (id.startsWith('ApiFn') || id.startsWith('EventsFn')),
+      )
+      expect(backends.length).toBe(2)
+      for (const [, resource] of backends) {
+        expect(secretIds.some((secretId) => (resource.DependsOn ?? []).includes(secretId))).toBe(true)
+      }
+    })
+
     it('puts no AUTH env var on any backend function when auth is omitted', () => {
       const { templates } = scenario('base', () => {
         const app = new App()

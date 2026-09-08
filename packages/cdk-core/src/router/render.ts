@@ -14,15 +14,19 @@
 
 import { backendReadTimeoutSeconds } from '../backend.js'
 import type { BackendProps } from '../types.js'
+import { renderGateSource } from './gate.js'
+import type { GateSourceProps } from './gate.js'
 
 export interface RouterSourceProps {
   /** e.g. 'cdk-core.ty.ler.dev'. Previews live at `pr-<n>.preview.<domain>`. */
   readonly domain: string
   /** Same keys and shape as PreviewSite's `backends`. */
   readonly backends: Record<string, BackendProps>
+  /** When set, splices the Google sign-in gate in front of every route. */
+  readonly gate?: GateSourceProps
 }
 
-interface BackendRoute {
+export interface BackendRoute {
   readonly key: string
   readonly prefix: string
   /** true when the pathPattern had no '*' and must match the full uri exactly. */
@@ -56,6 +60,34 @@ function derivePrefix(key: string, pathPattern: string): { prefix: string; match
     )
   }
   return { prefix: pathPattern.slice(0, -1), matchExact: false }
+}
+
+/**
+ * Derives each backend's route (prefix, exact-match flag, read timeout) from
+ * its `pathPattern`, validating and checking for overlap along the way.
+ * Shared by `renderRouterSource` and `renderSpaSource` so the two never
+ * disagree on what a backend's prefix is — `derivePrefix` is not duplicated.
+ */
+export function deriveBackendRoutes(backends: Record<string, BackendProps>): BackendRoute[] {
+  const routes: BackendRoute[] = Object.entries(backends).map(([key, backend]) => {
+    const { prefix, matchExact } = derivePrefix(key, backend.pathPattern)
+    const readTimeoutSeconds = backendReadTimeoutSeconds(key, backend)
+    return { key, prefix, matchExact, readTimeoutSeconds }
+  })
+
+  for (let i = 0; i < routes.length; i++) {
+    for (let j = i + 1; j < routes.length; j++) {
+      const a = routes[i]!
+      const b = routes[j]!
+      if (a.prefix.indexOf(b.prefix) === 0 || b.prefix.indexOf(a.prefix) === 0) {
+        throw new Error(
+          `backends '${a.key}' and '${b.key}' have overlapping path prefixes: ` +
+            `${JSON.stringify(a.prefix)} vs ${JSON.stringify(b.prefix)}`,
+        )
+      }
+    }
+  }
+  return routes
 }
 
 function renderBackendBlock(route: BackendRoute, index: number): string {
@@ -93,42 +125,50 @@ export function renderRouterSource(props: RouterSourceProps): string {
     throw new Error(`domain must be non-empty and contain no '/', got ${JSON.stringify(props.domain)}`)
   }
 
-  const entries = Object.entries(props.backends)
-  if (entries.length === 0) {
+  if (Object.keys(props.backends).length === 0) {
     throw new Error('renderRouterSource requires at least one backend')
   }
 
-  const routes: BackendRoute[] = entries.map(([key, backend]) => {
-    const { prefix, matchExact } = derivePrefix(key, backend.pathPattern)
-    const readTimeoutSeconds = backendReadTimeoutSeconds(key, backend)
-    return { key, prefix, matchExact, readTimeoutSeconds }
-  })
-
-  for (let i = 0; i < routes.length; i++) {
-    for (let j = i + 1; j < routes.length; j++) {
-      const a = routes[i]!
-      const b = routes[j]!
-      if (a.prefix.indexOf(b.prefix) === 0 || b.prefix.indexOf(a.prefix) === 0) {
-        throw new Error(
-          `backends '${a.key}' and '${b.key}' have overlapping path prefixes: ` +
-            `${JSON.stringify(a.prefix)} vs ${JSON.stringify(b.prefix)}`,
-        )
-      }
-    }
-  }
+  const routes = deriveBackendRoutes(props.backends)
 
   const bounceHost = `oauth.preview.${props.domain}`
   const previewSuffix = `.preview.${props.domain}`
   const backendBlocks = routes.map((route, index) => renderBackendBlock(route, index)).join('\n')
 
-  return `import cf from 'cloudfront'
+  const cryptoImport = props.gate ? `\nimport crypto from 'crypto'` : ''
+  const gateFragment = props.gate ? `\n${renderGateSource(props.gate)}` : ''
+  // Gating runs after the route lookup (below) so an unknown preview host
+  // still 404s rather than sending a stranger to Google. That means a
+  // gated preview does a second kvs.get on the main path -- a documented
+  // deviation from .claude/rules/cdk.md rule 4 ("one kvs.get per request"),
+  // because the gate needs the PR number to sign it into `state`, and the
+  // PR number is only known once the route lookup above has resolved `host`.
+  const gateCall = props.gate
+    ? `
+  // Deliberate second kvs.get on this path -- see the comment on \`gate\`
+  // above and .claude/rules/cdk.md rule 4.
+  var prMatch = /^pr-([0-9]+)\\./.exec(host)
+  var gated = await gate(request, prMatch ? prMatch[1] : '')
+  if (gated) return gated
+`
+    : ''
+
+  return stripSourceComments(`import cf from 'cloudfront'${cryptoImport}
 
 var kvs = cf.kvs()
-
+${gateFragment}
 var BOUNCE_HOST = ${JSON.stringify(bounceHost)}
 var PREVIEW_SUFFIX = ${JSON.stringify(previewSuffix)}
 var QUERY_ALLOWLIST = new RegExp(${JSON.stringify(QUERY_ALLOWLIST)})
-var STATE_PATTERN = /^[A-Za-z0-9_-]+\\.([0-9]+)$/
+// Two forms, tried in order. The gate's signed state is
+// '<iat>.<hexsig>~<pr>' -- '~' is in QUERY_ALLOWLIST but is not a hex or
+// base64url character, so the split is unambiguous. The legacy SPA state
+// (auth/browser.ts) is '<nonce>.<pr>', digits only after the dot. The
+// second pattern is deliberately not widened to allow '.' in its first
+// group: a hex signature can end in a run of digits, and greedy
+// backtracking would silently extract the wrong PR number.
+var STATE_PATTERN_SIGNED = /^[A-Za-z0-9_.-]+~([0-9]+)$/
+var STATE_PATTERN_LEGACY = /^[A-Za-z0-9_-]+\\.([0-9]+)$/
 
 var NOT_FOUND = {
   statusCode: 404,
@@ -148,7 +188,11 @@ async function handler(event) {
 
   if (host === BOUNCE_HOST) {
     var stateParam = qs.state && qs.state.value
-    var stateMatch = stateParam ? STATE_PATTERN.exec(stateParam) : null
+    var stateMatch = null
+    if (stateParam) {
+      stateMatch = STATE_PATTERN_SIGNED.exec(stateParam)
+      if (!stateMatch) stateMatch = STATE_PATTERN_LEGACY.exec(stateParam)
+    }
     if (!stateMatch) return NOT_FOUND
     var prNumber = stateMatch[1]
     var previewHost = 'pr-' + prNumber + PREVIEW_SUFFIX
@@ -202,7 +246,7 @@ async function handler(event) {
     return NOT_FOUND
   }
   if (!route || typeof route !== 'object') return NOT_FOUND
-
+${gateCall}
   var uri = request.uri
 
 ${backendBlocks}
@@ -217,5 +261,34 @@ ${backendBlocks}
   else request.uri = route.assets + uri
   return request
 }
-`
+`)
+}
+
+/**
+ * Drops comment-only lines from a generated function source.
+ *
+ * **This exists because of a hard quota, not for tidiness.** A CloudFront
+ * Function's maximum size is 10,240 bytes and AWS states it is not
+ * adjustable. Measured on the reference two-backend config, the gated preview
+ * router came to 9,767 bytes, of which **3,388 were comments** — a third of
+ * the artifact, and 473 bytes from a wall that a third backend (539 bytes)
+ * would have gone straight through.
+ *
+ * Those comments are not lost: they live in the generators that emit them,
+ * which is where someone changing this behaviour actually reads them.
+ * `.claude/rules/cdk.md` already says the router is generated and never
+ * edited as a deployed artifact, so the deployed copy is the one place the
+ * explanations were doing no work.
+ *
+ * Line-based on purpose: it removes a line only when its first non-whitespace
+ * characters are `//`. The emitted source contains `'https://'` inside string
+ * literals, and a naive `//`-anywhere strip would corrupt them — but a string
+ * literal never *starts* a line here. Blank lines are kept; 25 of them cost
+ * 25 bytes and are what makes the remaining source readable in the console.
+ */
+export function stripSourceComments(source: string): string {
+  return source
+    .split('\n')
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join('\n')
 }

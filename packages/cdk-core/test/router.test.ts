@@ -1,10 +1,19 @@
+import { createHmac } from 'node:crypto'
+import * as nodeCrypto from 'node:crypto'
 import { Duration } from 'aws-cdk-lib'
 import { describe, expect, it } from 'vitest'
-import { renderRouterSource } from '../src/router/render.js'
+import { renderRouterSource, stripSourceComments } from '../src/router/render.js'
 
 const REFERENCE_BACKENDS = {
   api: { pathPattern: '/api/*' },
   events: { pathPattern: '/events/*', streaming: true },
+}
+
+const GATE_PROPS = {
+  hostedUiDomain: 'cdk-core.auth.us-east-1.amazoncognito.com',
+  clientId: 'edgeclient123',
+  redirectUri: 'https://oauth.preview.cdk-core.ty.ler.dev/',
+  preview: true,
 }
 
 describe('renderRouterSource', () => {
@@ -57,10 +66,38 @@ describe('renderRouterSource', () => {
     expect(source).not.toMatch(/,\s*await\b/)
   })
 
-  it('calls kvs.get at most twice — once on the bounce path, once on the main path, only one executes per request', () => {
-    const source = renderRouterSource({ domain: 'cdk-core.ty.ler.dev', backends: REFERENCE_BACKENDS })
+  it('calls kvs.get at most three times — bounce path, main-path route lookup, and (when gated) the main-path secret read; only one branch executes per request', () => {
+    // Was "at most twice." A gated preview does a deliberate second kvs.get
+    // on the main path: the route lookup (kvs.get(host)) plus the gate
+    // fragment's own kvs.get(SECRET_KEY) for the session secret. See
+    // .claude/rules/cdk.md rule 4 — this is a documented deviation from "one
+    // kvs.get per request", not a regression.
+    const source = renderRouterSource({
+      domain: 'cdk-core.ty.ler.dev',
+      backends: REFERENCE_BACKENDS,
+      gate: GATE_PROPS,
+    })
     const matches = source.match(/kvs\.get\(/g) ?? []
-    expect(matches.length).toBeLessThanOrEqual(2)
+    expect(matches.length).toBeLessThanOrEqual(3)
+  })
+
+  it('renders under 10 KB even with a gate spliced in', () => {
+    const source = renderRouterSource({
+      domain: 'cdk-core.ty.ler.dev',
+      backends: REFERENCE_BACKENDS,
+      gate: GATE_PROPS,
+    })
+    expect(Buffer.byteLength(source, 'utf8')).toBeLessThan(10 * 1024)
+  })
+
+  it('never puts await inside a call\'s argument list, gate included', () => {
+    const source = renderRouterSource({
+      domain: 'cdk-core.ty.ler.dev',
+      backends: REFERENCE_BACKENDS,
+      gate: GATE_PROPS,
+    })
+    expect(source).not.toMatch(/\(\s*await\b/)
+    expect(source).not.toMatch(/,\s*await\b/)
   })
 
   it('rejects a pathPattern of "/*"', () => {
@@ -147,17 +184,24 @@ describe('renderRouterSource', () => {
  * distribution. Executing the handler closes that gap.
  *
  * `import cf from 'cloudfront'` is a module the edge runtime provides and Node
- * does not, so the import line is stripped and `cf` is injected as a parameter.
+ * does not, so the import line is stripped and `cf` is injected as a
+ * parameter — and, when the source has a gate spliced in, so is
+ * `import crypto from 'crypto'`, with Node's real `node:crypto` injected in
+ * its place so `gateHmac` computes a real HMAC.
  */
 function loadRouter(
   source: string,
   cf: unknown,
+  crypto?: unknown,
 ): (event: unknown) => Promise<Record<string, unknown>> {
-  const body = source.replace(/^import cf from 'cloudfront'\s*$/m, '')
-  const factory = new Function('cf', `${body}\nreturn handler`) as (
+  const body = source
+    .replace(/^import cf from 'cloudfront'\s*$/m, '')
+    .replace(/^import crypto from 'crypto'\s*$/m, '')
+  const factory = new Function('cf', 'crypto', `${body}\nreturn handler`) as (
     cfArg: unknown,
+    cryptoArg: unknown,
   ) => (event: unknown) => Promise<Record<string, unknown>>
-  return factory(cf)
+  return factory(cf, crypto)
 }
 
 interface FakeCf {
@@ -195,12 +239,19 @@ const ROUTE = JSON.stringify({
   },
 })
 
-const STORE = { 'pr-1.preview.cdk-core.ty.ler.dev': ROUTE }
+const STORE = {
+  'pr-1.preview.cdk-core.ty.ler.dev': ROUTE,
+  'pr-15.preview.cdk-core.ty.ler.dev': ROUTE,
+}
 
 function request(
   host: string,
   uri: string,
   querystring: Record<string, { value: string }> = {},
+  opts: {
+    headers?: Record<string, { value: string }>
+    cookies?: Record<string, { value: string }>
+  } = {},
 ): unknown {
   return {
     version: '1.0',
@@ -209,8 +260,8 @@ function request(
       method: 'GET',
       uri,
       querystring,
-      headers: { host: { value: host } },
-      cookies: {},
+      headers: { host: { value: host }, ...opts.headers },
+      cookies: opts.cookies ?? {},
     },
   }
 }
@@ -284,6 +335,24 @@ describe('the generated router, executed', () => {
     )
   })
 
+  it('bounces a real signed state (trailing ~<pr>) to the PR that owns it, both params intact', async () => {
+    // The state case that matters: STATE_PATTERN must accept the gate's
+    // signed form '<iat>.<hexsig>~<pr>', not just the legacy '<nonce>.<pr>'.
+    const { cf } = fakeCf(STORE)
+    const state = '1717000000.deadbeefcafebabe1234567890abcdef1234567890abcdef1234567890abcdef~15'
+    const out = await loadRouter(source, cf)(
+      request('oauth.preview.cdk-core.ty.ler.dev', '/', {
+        code: { value: 'authcode456' },
+        state: { value: state },
+      }),
+    )
+    expect(out.statusCode).toBe(302)
+    const headers = out.headers as Record<string, { value: string }>
+    expect(headers.location?.value).toBe(
+      `https://pr-15.preview.cdk-core.ty.ler.dev/auth/callback?code=authcode456&state=${state}`,
+    )
+  })
+
   it('refuses to bounce to a PR with no KVS entry, and refuses a malformed state', async () => {
     const { cf } = fakeCf(STORE)
     const handler = loadRouter(source, cf)
@@ -294,5 +363,167 @@ describe('the generated router, executed', () => {
       )
       expect(out.statusCode).toBe(404)
     }
+  })
+})
+
+describe('the generated router, executed, with a gate', () => {
+  const source = renderRouterSource({
+    domain: 'cdk-core.ty.ler.dev',
+    backends: REFERENCE_BACKENDS,
+    gate: GATE_PROPS,
+  })
+  const PREVIEW = 'pr-1.preview.cdk-core.ty.ler.dev'
+  const SECRET_KEY = '__cdkcore-session-secret'
+  const SESSION_COOKIE = '__Host-cdkcore-session'
+  const SECRET = 'edge-secret'
+  const GATED_STORE = { ...STORE, [SECRET_KEY]: SECRET }
+
+  function signSession(expSeconds: number): string {
+    const payload = `sub123|${expSeconds}`
+    const sig = createHmac('sha256', SECRET).update(payload).digest('hex')
+    return `${payload}.${sig}`
+  }
+
+  it('renders under 10 KB', () => {
+    expect(Buffer.byteLength(source, 'utf8')).toBeLessThan(10 * 1024)
+  })
+
+  it('never puts await inside a call\'s argument list', () => {
+    expect(source).not.toMatch(/\(\s*await\b/)
+    expect(source).not.toMatch(/,\s*await\b/)
+  })
+
+  it('passes a request with a valid session cookie through to normal routing', async () => {
+    const { cf } = fakeCf(GATED_STORE)
+    const cookie = signSession(Math.floor(Date.now() / 1000) + 3600)
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request(PREVIEW, '/', {}, { cookies: { [SESSION_COOKIE]: { value: cookie } } }),
+    )
+    expect(out.uri).toBe('/pr-1/index.html')
+  })
+
+  it('redirects a navigation with no cookie to the hosted UI, state carrying the PR', async () => {
+    const { cf } = fakeCf(GATED_STORE)
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request(PREVIEW, '/', {}, { headers: { 'sec-fetch-mode': { value: 'navigate' } } }),
+    )
+    expect(out.statusCode).toBe(302)
+    const headers = out.headers as Record<string, { value: string }>
+    expect(
+      headers.location?.value.startsWith(
+        'https://cdk-core.auth.us-east-1.amazoncognito.com/oauth2/authorize',
+      ),
+    ).toBe(true)
+    const state = new URL(headers.location.value).searchParams.get('state')
+    expect(state).toMatch(/~1$/)
+  })
+
+  it('401s a subresource fetch with no cookie', async () => {
+    const { cf } = fakeCf(GATED_STORE)
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request(PREVIEW, '/', {}, { headers: { 'sec-fetch-mode': { value: 'cors' } } }),
+    )
+    expect(out.statusCode).toBe(401)
+  })
+
+  it('redirects on a tampered cookie signature', async () => {
+    const { cf } = fakeCf(GATED_STORE)
+    const cookie = signSession(Math.floor(Date.now() / 1000) + 3600)
+    const tampered = cookie.slice(0, -1) + (cookie.at(-1) === '0' ? '1' : '0')
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request(
+        PREVIEW,
+        '/',
+        {},
+        { headers: { 'sec-fetch-mode': { value: 'navigate' } }, cookies: { [SESSION_COOKIE]: { value: tampered } } },
+      ),
+    )
+    expect(out.statusCode).toBe(302)
+  })
+
+  it('redirects on an expired session', async () => {
+    const { cf } = fakeCf(GATED_STORE)
+    const cookie = signSession(Math.floor(Date.now() / 1000) - 10)
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request(
+        PREVIEW,
+        '/',
+        {},
+        { headers: { 'sec-fetch-mode': { value: 'navigate' } }, cookies: { [SESSION_COOKIE]: { value: cookie } } },
+      ),
+    )
+    expect(out.statusCode).toBe(302)
+  })
+
+  it('503s when the KVS secret is missing', async () => {
+    const { cf } = fakeCf(STORE)
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request(PREVIEW, '/', {}, { headers: { 'sec-fetch-mode': { value: 'navigate' } } }),
+    )
+    expect(out.statusCode).toBe(503)
+  })
+
+  it('lets /auth/callback through ungated even with no cookie', async () => {
+    const { cf } = fakeCf(STORE)
+    const out = await loadRouter(source, cf, nodeCrypto)(request(PREVIEW, '/auth/callback'))
+    expect(out.uri).toBe('/pr-1/index.html')
+  })
+
+  it('still 404s an unknown preview host without ever reaching the gate', async () => {
+    const { cf } = fakeCf(GATED_STORE)
+    const out = await loadRouter(source, cf, nodeCrypto)(
+      request('pr-999.preview.cdk-core.ty.ler.dev', '/'),
+    )
+    expect(out.statusCode).toBe(404)
+  })
+})
+
+describe('the 10 KB function budget', () => {
+  // A CloudFront Function's maximum size is 10,240 bytes and AWS states the
+  // quota is **not adjustable**. Over it, `CreateFunction` fails; there is no
+  // partial success and no runtime warning. The gated preview router is the
+  // largest source this package emits, so it is the one that gets a guardrail.
+  //
+  // 8,192 is a deliberate tripwire, not the real limit: it leaves ~2 KB, and a
+  // backend block costs ~539 bytes, so this fails while there is still room to
+  // think rather than at the moment a deploy breaks. If it trips, the fix is to
+  // move explanation out of the emitted string and into the generator — not to
+  // raise this number.
+  it('renders the gated reference config well under the hard quota', () => {
+    const source = renderRouterSource({
+      domain: 'cdk-core.ty.ler.dev',
+      backends: REFERENCE_BACKENDS,
+      gate: GATE_PROPS,
+    })
+    const bytes = Buffer.byteLength(source, 'utf8')
+    expect(bytes).toBeLessThan(8 * 1024)
+    expect(bytes).toBeLessThan(10 * 1024)
+  })
+
+  it('emits no comment-only lines — they were a third of the artifact', () => {
+    const source = renderRouterSource({
+      domain: 'cdk-core.ty.ler.dev',
+      backends: REFERENCE_BACKENDS,
+      gate: GATE_PROPS,
+    })
+    expect(source.split('\n').filter((line) => /^\s*\/\//.test(line))).toEqual([])
+  })
+})
+
+describe('stripSourceComments', () => {
+  it('drops comment-only lines, indented or not', () => {
+    expect(stripSourceComments('// a\n  // b\nvar x = 1\n')).toBe('var x = 1\n')
+  })
+
+  it('keeps a line whose string literal contains "//"', () => {
+    // The emitted source builds redirect targets out of `'https://' + host`.
+    // A `//`-anywhere strip would corrupt them; this is why the filter is
+    // anchored to the start of the line.
+    const source = "var url = 'https://' + host\n"
+    expect(stripSourceComments(source)).toBe(source)
+  })
+
+  it('keeps blank lines', () => {
+    expect(stripSourceComments('var a = 1\n\nvar b = 2\n')).toBe('var a = 1\n\nvar b = 2\n')
   })
 })

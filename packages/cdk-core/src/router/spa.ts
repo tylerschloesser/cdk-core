@@ -18,15 +18,72 @@
  * Note that `uri.indexOf('.') === -1` — the form both prior-art sites use — is
  * not the same rule: it sends `/v1.2/settings` to the shell but also sends
  * `/assets/app.js` there whenever the path above it contains a dot.
+ *
+ * With `backends`, prod's one function is associated on the default behavior
+ * *and* on every backend behavior (the function itself cannot change which
+ * behavior was selected — `.claude/rules/cdk.md` rule 5), so it must not
+ * rewrite `/api/v1/x` to `/index.html`: a guard runs before the SPA rewrite
+ * for each backend's derived prefix. With `gate`, the same Google sign-in
+ * gate the preview router uses (`./gate.js`) runs first and can short-circuit
+ * the request.
  */
 
-/** Renders the source of the prod SPA-fallback function. Takes no arguments: the rule has no configuration. */
-export function renderSpaSource(): string {
-  return `function handler(event) {
+import { deriveBackendRoutes, stripSourceComments } from './render.js'
+import type { BackendProps } from '../types.js'
+import { renderGateSource } from './gate.js'
+import type { GateSourceProps } from './gate.js'
+
+export interface SpaSourceProps {
+  /** Same keys and shape as `Site`'s `backends`. When set, those paths are not rewritten. */
+  readonly backends?: Record<string, BackendProps>
+  /** When set, splices the Google sign-in gate in front of the SPA rewrite. */
+  readonly gate?: GateSourceProps
+}
+
+/**
+ * Renders the source of the prod SPA-fallback function.
+ *
+ * With no `props` (or an empty one), the output is byte-identical to the
+ * original no-argument form — the no-auth, no-backend consumer path is
+ * untouched.
+ */
+export function renderSpaSource(props?: SpaSourceProps): string {
+  const backendGuards = props?.backends
+    ? deriveBackendRoutes(props.backends)
+        .map((route) => {
+          const cond = route.matchExact
+            ? `uri === ${JSON.stringify(route.prefix)}`
+            : `uri.indexOf(${JSON.stringify(route.prefix)}) === 0`
+          return `  if (${cond}) return request`
+        })
+        .join('\n')
+    : ''
+
+  if (!props?.gate) {
+    const guardBlock = backendGuards ? `${backendGuards}\n` : ''
+    return `function handler(event) {
   var request = event.request
   var uri = request.uri
-  if (uri.lastIndexOf('.') <= uri.lastIndexOf('/')) request.uri = '/index.html'
+${guardBlock}  if (uri.lastIndexOf('.') <= uri.lastIndexOf('/')) request.uri = '/index.html'
   return request
 }
 `
+  }
+
+  const gateFragment = renderGateSource(props.gate)
+  const guardBlock = backendGuards ? `${backendGuards}\n` : ''
+  return stripSourceComments(`import cf from 'cloudfront'
+import crypto from 'crypto'
+
+var kvs = cf.kvs()
+${gateFragment}
+async function handler(event) {
+  var request = event.request
+  var gated = await gate(request, '')
+  if (gated) return gated
+  var uri = request.uri
+${guardBlock}  if (uri.lastIndexOf('.') <= uri.lastIndexOf('/')) request.uri = '/index.html'
+  return request
+}
+`)
 }

@@ -61,7 +61,10 @@ Everything is **us-east-1** (CloudFront requires its ACM certificate there) in a
 ## CloudFront Functions (the router)
 
 The router is **generated** by `renderRouterSource()` from the `backends` map — never edited
-as a deployed artifact. It is associated as `viewer-request` on **every** behavior.
+as a deployed artifact. It is associated as `viewer-request` on **every** behavior. With
+`auth.gate`, the Google sign-in gate is spliced into it (and into prod's SPA function), the
+emitted source has its comments stripped to fit the 10 KB quota, and `/auth/*` becomes the one
+behavior carrying **no** function — see `.claude/rules/edge-gate.md` before touching any of it.
 
 1. **`await` must never appear inside a call's argument list.** `JSON.parse(await kvs.get(k))`
    is a *syntax* error in the `cloudfront-js-2.0` engine:

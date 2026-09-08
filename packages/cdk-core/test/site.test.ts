@@ -101,6 +101,42 @@ function distribution(template: Template): Record<string, unknown> {
   return only.Properties.DistributionConfig
 }
 
+/** Shared by the `auth` and `without a gate` describe blocks below. */
+function buildWithAuth(): { site: Site; template: Template } {
+  const app = new App()
+  const stack = new Stack(app, 'WithAuth', {
+    env: { account: '111122223333', region: 'us-east-1' },
+  })
+  const zone = route53.HostedZone.fromHostedZoneAttributes(stack, 'Zone', {
+    hostedZoneId: 'Z0000000000000000000',
+    zoneName: 'ty.ler.dev',
+  })
+  const certificate = acm.Certificate.fromCertificateArn(
+    stack,
+    'Cert',
+    'arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000',
+  )
+  const fn = new lambda.Function(stack, 'Fn', {
+    runtime: lambda.Runtime.NODEJS_22_X,
+    handler: 'index.handler',
+    code: lambda.Code.fromInline('exports.handler = async () => ({})'),
+  })
+  const site = new Site(stack, 'Site', {
+    domain: 'cdk-core.ty.ler.dev',
+    zone,
+    certificate,
+    webDist,
+    auth: { domainPrefix: 'cdk-core', idTokenValidity: Duration.hours(1) },
+    backends: {
+      api: {
+        pathPattern: '/api/*',
+        functionUrl: fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM }),
+      },
+    },
+  })
+  return { site, template: Template.fromStack(stack) }
+}
+
 describe('Site', () => {
   it('deploys the assets and the unversioned shell as two separate BucketDeployments', () => {
     const { template } = build()
@@ -296,41 +332,6 @@ describe('Site', () => {
   })
 
   describe('auth', () => {
-    function buildWithAuth(): { site: Site; template: Template } {
-      const app = new App()
-      const stack = new Stack(app, 'WithAuth', {
-        env: { account: '111122223333', region: 'us-east-1' },
-      })
-      const zone = route53.HostedZone.fromHostedZoneAttributes(stack, 'Zone', {
-        hostedZoneId: 'Z0000000000000000000',
-        zoneName: 'ty.ler.dev',
-      })
-      const certificate = acm.Certificate.fromCertificateArn(
-        stack,
-        'Cert',
-        'arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000',
-      )
-      const fn = new lambda.Function(stack, 'Fn', {
-        runtime: lambda.Runtime.NODEJS_22_X,
-        handler: 'index.handler',
-        code: lambda.Code.fromInline('exports.handler = async () => ({})'),
-      })
-      const site = new Site(stack, 'Site', {
-        domain: 'cdk-core.ty.ler.dev',
-        zone,
-        certificate,
-        webDist,
-        auth: { domainPrefix: 'cdk-core', idTokenValidity: Duration.hours(1) },
-        backends: {
-          api: {
-            pathPattern: '/api/*',
-            functionUrl: fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM }),
-          },
-        },
-      })
-      return { site, template: Template.fromStack(stack) }
-    }
-
     /**
      * **The load-bearing assertion of the whole epoch.** D6 claims machine
      * sign-in is *structurally* impossible against prod, and this list is the
@@ -410,6 +411,154 @@ describe('Site', () => {
       const { template } = build()
       template.resourceCountIs('AWS::Cognito::UserPool', 0)
       template.resourceCountIs('AWS::Cognito::UserPoolClient', 0)
+    })
+  })
+
+  describe('edge gate', () => {
+    function buildWithGate(): { site: Site; template: Template } {
+      const app = new App()
+      const stack = new Stack(app, 'WithGate', {
+        env: { account: '111122223333', region: 'us-east-1' },
+      })
+      const zone = route53.HostedZone.fromHostedZoneAttributes(stack, 'Zone', {
+        hostedZoneId: 'Z0000000000000000000',
+        zoneName: 'ty.ler.dev',
+      })
+      const certificate = acm.Certificate.fromCertificateArn(
+        stack,
+        'Cert',
+        'arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000',
+      )
+      const apiFn = new lambda.Function(stack, 'ApiFn', {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => ({})'),
+      })
+      const eventsFn = new lambda.Function(stack, 'EventsFn', {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => ({})'),
+      })
+      const site = new Site(stack, 'Site', {
+        domain: 'cdk-core.ty.ler.dev',
+        zone,
+        certificate,
+        webDist,
+        auth: { domainPrefix: 'cdk-core', gate: 'edge' },
+        backends: {
+          api: {
+            pathPattern: '/api/*',
+            functionUrl: apiFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM }),
+          },
+          events: {
+            pathPattern: '/events/*',
+            streaming: true,
+            functionUrl: eventsFn.addFunctionUrl({
+              authType: lambda.FunctionUrlAuthType.AWS_IAM,
+              invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
+            }),
+          },
+        },
+      })
+      return { site, template: Template.fromStack(stack) }
+    }
+
+    /** The auth Lambda is the only `AWS::Lambda::Function` carrying `AUTH_SESSION_SECRET`. */
+    function findAuthLambdaEnv(template: Template): Record<string, unknown> {
+      const fns = Object.values(template.findResources('AWS::Lambda::Function')) as {
+        Properties: { Environment?: { Variables?: Record<string, unknown> } }
+      }[]
+      const found = fns.find((f) => f.Properties.Environment?.Variables?.AUTH_SESSION_SECRET !== undefined)
+      if (!found) throw new Error('no Lambda::Function found with AUTH_SESSION_SECRET in its environment')
+      return found.Properties.Environment!.Variables!
+    }
+
+    it('creates a KeyValueStore and associates it with the CloudFront Function', () => {
+      const { template } = buildWithGate()
+      template.resourceCountIs('AWS::CloudFront::KeyValueStore', 1)
+
+      const fns = Object.values(template.findResources('AWS::CloudFront::Function')) as {
+        Properties: { FunctionConfig?: { KeyValueStoreAssociations?: unknown[] } }
+      }[]
+      expect(fns).toHaveLength(1)
+      expect(fns[0]!.Properties.FunctionConfig?.KeyValueStoreAssociations).toHaveLength(1)
+    })
+
+    it('gives the /auth/* behavior CACHING_DISABLED and no function association', () => {
+      const { template } = buildWithGate()
+      const config = distribution(template) as {
+        CacheBehaviors: { PathPattern: string; CachePolicyId: string; FunctionAssociations?: unknown[] }[]
+      }
+      const authBehavior = config.CacheBehaviors.find((b) => b.PathPattern === '/auth/*')
+      expect(authBehavior).toBeDefined()
+      // Not a preference — the whole safety property. A cached `Set-Cookie`
+      // hands one visitor's session to the next.
+      expect(authBehavior?.CachePolicyId).toBe(cloudfront.CachePolicy.CACHING_DISABLED.cachePolicyId)
+      expect(authBehavior?.FunctionAssociations).toBeUndefined()
+    })
+
+    it('puts exactly one viewer-request function association on the default behavior and every backend behavior', () => {
+      const { template } = buildWithGate()
+      const config = distribution(template) as {
+        DefaultCacheBehavior: { FunctionAssociations?: unknown[] }
+        CacheBehaviors: { PathPattern: string; FunctionAssociations?: unknown[] }[]
+      }
+      expect(config.DefaultCacheBehavior.FunctionAssociations).toHaveLength(1)
+      const backendBehaviors = config.CacheBehaviors.filter((b) => b.PathPattern !== '/auth/*')
+      expect(backendBehaviors).toHaveLength(2)
+      for (const behavior of backendBehaviors) {
+        expect(behavior.FunctionAssociations).toHaveLength(1)
+      }
+    })
+
+    it('puts AUTH_SESSION_SECRET on the auth Lambda as a {{resolve:secretsmanager:…}} dynamic reference', () => {
+      const { template } = buildWithGate()
+      const env = findAuthLambdaEnv(template)
+      // Built from the secret's literal name (`SecretValue.secretsManager`),
+      // not its ARN, so — unlike the Google client secret in `user-pool.ts`,
+      // which needs the account's partition and so renders as an `Fn::Join`
+      // (`.claude/rules/auth.md` item 3) — this one needs no pseudo-parameter
+      // and serializes as a plain string. Assert on the serialized form
+      // regardless, per the same rule.
+      expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain(
+        '{{resolve:secretsmanager:cdk-core.ty.ler.dev/session-secret:SecretString:secret::}}',
+      )
+    })
+
+    it('creates a Custom::CdkCoreKvsSecret resource to copy the secret into the store', () => {
+      const { template } = buildWithGate()
+      template.resourceCountIs('Custom::CdkCoreKvsSecret', 1)
+    })
+
+    it('exposes sessionSecret and AUTH_SESSION_SECRET in authEnvironment', () => {
+      const { site } = buildWithGate()
+      expect(site.sessionSecret).toBeDefined()
+      expect(site.authEnvironment).toHaveProperty('AUTH_SESSION_SECRET')
+    })
+  })
+
+  describe('without a gate', () => {
+    it('synthesizes no KeyValueStore, no /auth/* behavior, and untouched backend behaviors, with auth but no gate', () => {
+      const { template } = buildWithAuth()
+      template.resourceCountIs('AWS::CloudFront::KeyValueStore', 0)
+      template.resourceCountIs('Custom::CdkCoreKvsSecret', 0)
+      const config = distribution(template) as {
+        CacheBehaviors: { PathPattern: string; FunctionAssociations?: unknown[] }[]
+      }
+      expect(config.CacheBehaviors.map((b) => b.PathPattern)).not.toContain('/auth/*')
+      for (const behavior of config.CacheBehaviors) {
+        expect(behavior.FunctionAssociations).toBeUndefined()
+      }
+    })
+
+    it('synthesizes no KeyValueStore and no /auth/* behavior with no auth at all', () => {
+      const { template } = build()
+      template.resourceCountIs('AWS::CloudFront::KeyValueStore', 0)
+      template.resourceCountIs('Custom::CdkCoreKvsSecret', 0)
+      const config = distribution(template) as {
+        CacheBehaviors: { PathPattern: string }[]
+      }
+      expect(config.CacheBehaviors.map((b) => b.PathPattern)).not.toContain('/auth/*')
     })
   })
 })

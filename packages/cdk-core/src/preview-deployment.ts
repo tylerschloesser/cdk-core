@@ -10,7 +10,7 @@
  * dozen open PRs from becoming a dozen dependents of one stack.
  */
 
-import { CustomResource, Duration, Fn, Stack, Tags } from 'aws-cdk-lib'
+import { CustomResource, Duration, Fn, SecretValue, Stack, Tags } from 'aws-cdk-lib'
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
 import * as iam from 'aws-cdk-lib/aws-iam'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
@@ -47,6 +47,18 @@ export interface PreviewDeploymentProps {
    * @default false
    */
   readonly auth?: boolean
+  /**
+   * Set when the site's `PreviewSite` was created with `auth.gate === 'edge'`.
+   *
+   * Same reasoning as `auth`: a PR stack cannot read a construct reference
+   * back from `PreviewSite`, and the session secret it needs lives in a
+   * fixed-name Secrets Manager secret (`<domain>/preview-session-secret`)
+   * this construct already knows the name of — a missing secret would fail
+   * the *deploy*, not the synth, so the consumer states it.
+   *
+   * @default false
+   */
+  readonly gate?: boolean
 }
 
 export class PreviewDeployment extends Construct {
@@ -98,6 +110,18 @@ export class PreviewDeployment extends Construct {
         // client as their `aud` and a human's carry `browser`. The pool is the
         // isolation boundary, not the client.
         AUTH_CLIENT_ID: `${clientId},${read('authMachineClientId')}`,
+        // The shared preview stack is deployed long before any PR stack, so
+        // (unlike `PreviewSite`'s own `AuthLambda`) no explicit
+        // `node.addDependency` is needed here even though a dynamic reference
+        // creates no implicit ordering.
+        ...(props.gate
+          ? {
+              AUTH_SESSION_SECRET: SecretValue.secretsManager(
+                `${props.domain}/preview-session-secret`,
+                { jsonField: 'secret' },
+              ).unsafeUnwrap(),
+            }
+          : {}),
       }
     } else {
       this.authEnvironment = {}
