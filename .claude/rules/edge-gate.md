@@ -60,6 +60,23 @@ them, not an oversight. Change a format and all three change in one commit.
     `.`-separated pattern instead **does not work**: a hex signature can end in a run of
     digits, and greedy backtracking then extracts the wrong PR with no error. `render.ts`
     keeps two patterns — the `~` form first, the legacy `<nonce>.<pr>` SPA form second.
+  - **Cognito sends the `~` back percent-encoded as `%7E`, and CloudFront Functions do not
+    decode query-string values.** So the bounce branch must `decodeURIComponent` `state` (and
+    `code`, and `error`) *before* matching and before the allowlist check. Without that, every
+    real sign-in ends on the bounce host's bare `404 no such preview` while every synthetic
+    test stays green, because a hand-written test passes the raw `~`. `~` is unreserved in RFC
+    3986, so leaving it alone and encoding it are **both** legal and a receiver must treat them
+    as equivalent — do not "fix" this by picking a different separator, because the next
+    character can be encoded too. Decoding first is also the safer order: anything that needed
+    encoding cannot pass `^[A-Za-z0-9._~-]+$` once decoded, so the re-forwarded value is safe
+    by construction.
+    Reproduce with no browser and no login — ask the hosted UI for an invalid scope and it
+    bounces straight back to `redirect_uri`, echoing `state` through its own encoder:
+    ```
+    curl -sSD- -o /dev/null "https://<prefix>.auth.<region>.amazoncognito.com/oauth2/authorize\
+      ?client_id=<id>&response_type=code&scope=not_a_real_scope\
+      &redirect_uri=<urlencoded>&state=1700000000.deadbeef~17"
+    ```
   - The PR is *inside* the signed body (`<iat>~<pr>`) but *after* the signature in the emitted
     string. That asymmetry is deliberate: the regex needs it last, the signature needs it
     covered.
