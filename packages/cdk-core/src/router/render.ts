@@ -170,6 +170,15 @@ var QUERY_ALLOWLIST = new RegExp(${JSON.stringify(QUERY_ALLOWLIST)})
 var STATE_PATTERN_SIGNED = /^[A-Za-z0-9_.-]+~([0-9]+)$/
 var STATE_PATTERN_LEGACY = /^[A-Za-z0-9_-]+\\.([0-9]+)$/
 
+function decodeParam(value) {
+  if (!value) return ''
+  try {
+    return decodeURIComponent(value)
+  } catch (e) {
+    return ''
+  }
+}
+
 var NOT_FOUND = {
   statusCode: 404,
   statusDescription: 'Not Found',
@@ -187,7 +196,15 @@ async function handler(event) {
   var qs = request.querystring
 
   if (host === BOUNCE_HOST) {
-    var stateParam = qs.state && qs.state.value
+    // Cognito percent-encodes \`~\` in the \`state\` it echoes back -- measured,
+    // not assumed: an authorize call with a deliberately invalid scope bounces
+    // to \`redirect_uri\` carrying \`state=<iat>.<sig>%7E<pr>\`. CloudFront
+    // Functions do **not** decode query-string values, so matching the raw
+    // value fails both STATE_PATTERNs and every real login lands on the bare
+    // 404 below. Decoding first is also the safer order for the allowlist:
+    // anything that needed encoding cannot pass \`^[A-Za-z0-9._~-]+$\` once
+    // decoded, so re-forwarding the decoded form is safe by construction.
+    var stateParam = decodeParam(qs.state && qs.state.value)
     var stateMatch = null
     if (stateParam) {
       stateMatch = STATE_PATTERN_SIGNED.exec(stateParam)
@@ -216,11 +233,10 @@ async function handler(event) {
     // cannot be turned into an open redirector (RFC 9700 section 4.11.1:
     // "clients MUST NOT expose open redirectors").
     var params = []
-    var code = qs.code && qs.code.value
+    var code = decodeParam(qs.code && qs.code.value)
     if (code && QUERY_ALLOWLIST.test(code)) params.push('code=' + code)
-    var stateOut = qs.state && qs.state.value
-    if (stateOut && QUERY_ALLOWLIST.test(stateOut)) params.push('state=' + stateOut)
-    var error = qs.error && qs.error.value
+    if (QUERY_ALLOWLIST.test(stateParam)) params.push('state=' + stateParam)
+    var error = decodeParam(qs.error && qs.error.value)
     if (error && QUERY_ALLOWLIST.test(error)) params.push('error=' + error)
 
     return {

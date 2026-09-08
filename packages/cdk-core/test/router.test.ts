@@ -353,6 +353,62 @@ describe('the generated router, executed', () => {
     )
   })
 
+  it('bounces a state whose ~ Cognito percent-encoded as %7E — the shape a real login actually sends', async () => {
+    // **This is what a real Cognito round-trip sends, and the test above does
+    // not cover it.** `~` is unreserved in RFC 3986, so it is legal to leave
+    // it alone *and* legal to percent-encode it — and Cognito encodes it.
+    // Measured, not assumed; reproduce with no browser and no login by asking
+    // the hosted UI for a deliberately invalid scope, which bounces straight
+    // back to redirect_uri echoing `state`:
+    //
+    //   curl -sSD- -o /dev/null "https://<prefix>.auth.<region>.amazoncognito.com/oauth2/authorize\
+    //     ?client_id=<id>&response_type=code&scope=not_a_real_scope\
+    //     &redirect_uri=<encoded>&state=1788835071.7b18...9f~17"
+    //   → location: ...?error=invalid_request&state=1788835071.7b18...9f%7E17
+    //
+    // CloudFront Functions do not decode query-string values, so before the
+    // router decoded them this produced the bounce host's bare 404 on every
+    // real sign-in while every synthetic test — which passes the raw `~` —
+    // stayed green.
+    const { cf } = fakeCf(STORE)
+    const decoded = '1717000000.deadbeefcafebabe1234567890abcdef1234567890abcdef1234567890abcdef~15'
+    const encoded = decoded.replace('~', '%7E')
+    const out = await loadRouter(source, cf)(
+      request('oauth.preview.cdk-core.ty.ler.dev', '/', {
+        code: { value: 'authcode456' },
+        state: { value: encoded },
+      }),
+    )
+    expect(out.statusCode).toBe(302)
+    const headers = out.headers as Record<string, { value: string }>
+    // Forwarded in its decoded form: the allowlist is written for that, and the
+    // Lambda verifies the signature over `<iat>~<pr>`.
+    expect(headers.location?.value).toBe(
+      `https://pr-15.preview.cdk-core.ty.ler.dev/auth/callback?code=authcode456&state=${decoded}`,
+    )
+  })
+
+  it('drops a param whose decoded form fails the allowlist, rather than forwarding it', async () => {
+    // Decoding before the allowlist check is the safe order: `%2F%2Fevil.com`
+    // decodes to `//evil.com`, which the allowlist rejects. Checking the raw
+    // value would also have rejected it (`%` is not allowed), but only by
+    // accident — this pins the property that matters.
+    const { cf } = fakeCf(STORE)
+    const state = '1717000000.deadbeefcafebabe1234567890abcdef1234567890abcdef1234567890abcdef~15'
+    const out = await loadRouter(source, cf)(
+      request('oauth.preview.cdk-core.ty.ler.dev', '/', {
+        code: { value: '%2F%2Fevil.example' },
+        state: { value: state },
+      }),
+    )
+    expect(out.statusCode).toBe(302)
+    const headers = out.headers as Record<string, { value: string }>
+    expect(headers.location?.value).toBe(
+      `https://pr-15.preview.cdk-core.ty.ler.dev/auth/callback?state=${state}`,
+    )
+    expect(headers.location?.value).not.toContain('evil.example')
+  })
+
   it('refuses to bounce to a PR with no KVS entry, and refuses a malformed state', async () => {
     const { cf } = fakeCf(STORE)
     const handler = loadRouter(source, cf)
