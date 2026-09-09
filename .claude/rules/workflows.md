@@ -35,6 +35,14 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
   from `ci.yml`, the one workflow with no OIDC exchange at all.
 - **`deploy.yml` runs on every push to `main`**, so merging an epoch branch deploys production.
   A broken `main` is a broken prod site.
+- **`pr-preview.yml`'s comment embeds a QR of the preview URL as an `api.qrserver.com` image**,
+  so the preview is a scan away on a phone. A hosted image is the only form that works: GitHub
+  strips `data:` URIs and inline `<svg>` from comments. Camo proxies and caches it, so an
+  existing comment survives the service going away, and it renders in the GitHub mobile app.
+  `qzone=2` is not optional — without a quiet zone the code sits flush against the page
+  background and scanners fail in dark mode. Re-check the service with `curl -sSI` on the
+  rendered URL, expecting `200` and `image/png`; a broken image in a *new* comment is that
+  service, not the preview.
 - `actionlint .github/workflows/*.yml` before committing one. Its embedded shellcheck is why
   `"$PR"` is quoted everywhere.
 
