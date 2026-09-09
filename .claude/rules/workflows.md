@@ -12,7 +12,7 @@ Loaded when you touch a workflow, a workflow template, the OIDC role or the swee
 side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, KVS writes are
 `.claude/rules/streaming-and-kvs.md`, and the user pools are `.claude/rules/auth.md`.
 
-## The six workflows
+## The seven workflows
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
@@ -22,6 +22,7 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
 | `pr-teardown.yml` | PR closed | `delete-stack`, no wait. No checkout, no build, no CDK |
 | `cleanup.yml` | daily cron, dispatch | `pnpm --filter infra exec cdk-core sweep` |
 | `publish.yml` | push of tag `v*`, dispatch with `dry_run` | verify tag matches `package.json` version, `pnpm verify`, `consumer-smoke.sh --pack`, `pnpm publish --provenance --no-git-checks` to npm via OIDC. **No AWS**, and the only one authenticating to npm instead |
+| `claude.yml` | `@claude` in an issue, comment or review | one scoped task, then opens its own PR and waits for its checks. **No AWS role and no `aws`/`cdk` on its allowlist**, so a run cannot deploy, sweep or measure |
 
 - **Everything that touches CloudFormation is `cancel-in-progress: false`**, and
   `pr-teardown.yml` shares `pr-preview.yml`'s concurrency group so a close can never race a
@@ -33,6 +34,11 @@ side of all this — stacks, the router, origins — is `.claude/rules/cdk.md`, 
   the two directories by "the workflow requests `id-token: write`" — which is what
   distinguishes a workflow that authenticates by OIDC (to AWS, or to npm for `publish.yml`)
   from `ci.yml`, the one workflow with no OIDC exchange at all.
+  **`id-token: write` is a proxy, and `claude.yml` is where it leaks**: that workflow exchanges
+  its OIDC token with *Anthropic*, for a Claude GitHub App token, and is not site
+  infrastructure — so `new-site` does not ship it and it has no template. It is named in the
+  test's `NOT_TEMPLATED` set for exactly that reason. Adding a name there is how you say "this
+  one is deliberate"; the test still fails for every workflow nobody has thought about.
 - **`deploy.yml` runs on every push to `main`**, so merging an epoch branch deploys production.
   A broken `main` is a broken prod site.
 - **`pr-preview.yml`'s comment embeds a QR of the preview URL as an `api.qrserver.com` image**,

@@ -1,0 +1,110 @@
+# Claude Code GitHub Action. Responds when someone with write access mentions
+# @claude in an issue, an issue comment, a PR review or a PR review comment.
+#
+# Ported from yahn.ty.ler.dev's, which is where every lesson encoded here was
+# actually paid for. Until this file existed, `@claude` on a cdk-core issue did
+# nothing at all — no run, no comment, no error — which is a worse failure than
+# a red run, because there is nothing to go look at.
+#
+# Authenticates with a Claude subscription token (`claude setup-token`) stored
+# as the CLAUDE_CODE_OAUTH_TOKEN repository secret. The Claude GitHub App must
+# also be installed on the repo.
+#
+# The `issues: opened` trigger means an issue whose title or body contains
+# "@claude" starts a run the moment it is created.
+#
+# **A run here is not an epoch.** CLAUDE.md's epoch workflow (`/epoch`,
+# `/handoff`, plan.md's Status block) is for a local session. A run started
+# from an issue does one scoped thing and opens a PR for it; it does not
+# advance plan.md, and it must not pretend to.
+
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+# One run at a time per issue or PR, so two comments don't race on a branch.
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # lets Claude read CI results on PRs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Same toolchain as ci.yml — node 22 here, not 24.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `--filter e2e`, not a bare `pnpm exec`: @playwright/test is a
+      # dependency of the e2e package, not of the root, so the binary only
+      # resolves inside it. Without this, `pnpm e2e` in the allowlist below is
+      # a false promise — it would fail on its first run every time.
+      - run: pnpm --filter e2e exec playwright install --with-deps chromium
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # `--allowedTools` is a second, narrower allowlist than
+          # `.claude/settings.json`, and the run obeys the intersection. An
+          # entry missing here cannot be run no matter what settings say.
+          #
+          # `pnpm verify` is the whole point: lint + typecheck + test + build,
+          # what every other job runs, and — per CLAUDE.md — it needs no
+          # credentials. Its parts are listed separately so a run that only
+          # wants to re-check types need not run the lot. `pnpm e2e` is the
+          # browser suite, deliberately outside `verify`.
+          #
+          # **Nothing here touches AWS, and that is deliberate rather than an
+          # oversight.** CLAUDE.md reserves every AWS interaction, every
+          # measurement and anything touching the Construct API for a local
+          # orchestrator session. This job is given no AWS role and no
+          # `aws`/`cdk` allowlist entry, so a run cannot quietly deploy, sweep
+          # or delete a stack even if it decides it should.
+          #
+          # `gh pr create` and the `--append-system-prompt` below are both
+          # required to make a run open its own PR. The action will not do it
+          # on the allowlist alone: its built-in prompt says "Provide a URL to
+          # create a PR manually", by design, so branch protection stays with a
+          # human (anthropics/claude-code-action docs/faq.md). The append lands
+          # after that prompt, which is why it wins. Drop either half and you
+          # are back to compare links nobody clicks.
+          #
+          # `gh pr checks`, `gh run view` and `sleep` are what let the run wait
+          # for the CI it just started. Without them `gh pr create` is the last
+          # thing a run does and it reports "done" seconds before its own
+          # checks begin. `--watch` blocks, so there is no polling loop to get
+          # wrong. The cost is real runner minutes spent idling through
+          # ci.yml and pr-preview.yml, and it buys a run that cannot call a red
+          # PR finished.
+          claude_args: |
+            --allowedTools "Bash(pnpm verify),Bash(pnpm lint),Bash(pnpm lint:fix),Bash(pnpm typecheck),Bash(pnpm test),Bash(pnpm build),Bash(pnpm e2e),Bash(pnpm e2e:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(gh search:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(gh pr checks:*),Bash(gh run view:*),Bash(gh label list:*),Bash(sleep:*)"
+            --append-system-prompt "This repository wants you to open the pull request yourself, which overrides the instruction above to provide a manual compare URL. Whenever you have pushed a branch with changes, run: gh pr create --base main --head THE_BRANCH_YOU_PUSHED --title ... --body ... . Write the body as Summary and Test plan sections, state what you ran and what you could not run, and include the line Fixes #N when the work closes an issue. Then report the URL of the PR you created rather than a compare link. If gh pr create fails, fall back to the compare link and say plainly that it failed and why. After the PR exists, wait for its checks rather than ending the run: sleep 60 so the checks register, then run gh pr checks THE_PR_NUMBER --watch --interval 30 --fail-fast=false, which blocks until every check has finished. If that command reports that no checks exist yet, sleep 60 and run it once more before giving up on waiting. When a check fails, read its log with gh run view --job JOB_ID --log-failed, and say in your comment which check failed and what the failing output was. Do not describe a red or still-running PR as done, and do not claim CI is green unless gh pr checks actually said so. You have no AWS credentials and no aws or cdk command on your allowlist. That is deliberate: this repo reserves every AWS interaction, every measurement and anything touching the Construct API for a local session. If the task you were given cannot be finished without deploying, sweeping, deleting a stack or measuring against real infrastructure, do the part that does not need AWS, then stop and say plainly in your comment which part needs a local session and why. Never claim a deploy, a stack deletion or a timing measurement that you did not and could not perform. You are also not running an epoch: do not edit plan.md's Status block or append to progress.md, and do not invoke the epoch or handoff skills. Those belong to a local session."

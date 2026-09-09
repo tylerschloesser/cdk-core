@@ -17,6 +17,10 @@ survives, so anything the next session must know goes in those files before you 
 - A change that invalidates a claim in `plan.md`, this file, or a rule fixes it **in the same
   commit**. A false claim is worse than a missing one: the next session will "fix" working code.
 - Three samples are not a measurement. Interleave, randomize order, report median and range.
+- **An `@claude` run is not an epoch.** `.github/workflows/claude.yml` answers an `@claude`
+  mention by doing one scoped thing and opening a PR. It has no AWS credentials by design, so
+  it cannot deploy, sweep or measure — and it must not touch `plan.md`'s Status block or
+  `progress.md`. Those stay with a local session. See `.claude/rules/workflows.md`.
 
 ## Always true
 
