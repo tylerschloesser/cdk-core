@@ -61,7 +61,7 @@ survives, so anything the next session must know goes in those files before you 
   prod pool. `.claude/rules/auth.md` has the rest.
 - Rule files in `.claude/rules/` load when you read matching paths; read the relevant one
   **before** planning, not after your first file read. Keep this file under 100 lines and
-  each rule under about 120. **`edge-gate.md` is exempt** (~160), as `workflows.md` already
+  each rule under about 120. **`edge-gate.md` is exempt** (~220), as `workflows.md` already
   is: the gate's cookie format, `state` format and PKCE derivation each exist in three
   implementations that cannot import each other, and cutting any of them to hit a line count
   removes the only place their agreement is written down. The test is whether a reader finds

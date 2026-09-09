@@ -556,6 +556,20 @@ describe('the 10 KB function budget', () => {
     expect(bytes).toBeLessThan(10 * 1024)
   })
 
+  // The guardrail has to cover the shape a consumer actually configures, not
+  // only the default one: each ungated path adds a clause pair to the gate's
+  // first line, so the budget is a function of `ungatedPaths` now.
+  it('renders the gated reference config with an ungated path well under the hard quota', () => {
+    const source = renderRouterSource({
+      domain: 'cdk-core.ty.ler.dev',
+      backends: REFERENCE_BACKENDS,
+      gate: { ...GATE_PROPS, ungatedPaths: ['/api/health'] },
+    })
+    const bytes = Buffer.byteLength(source, 'utf8')
+    expect(bytes).toBeLessThan(8 * 1024)
+    expect(bytes).toBeLessThan(10 * 1024)
+  })
+
   it('emits no comment-only lines — they were a third of the artifact', () => {
     const source = renderRouterSource({
       domain: 'cdk-core.ty.ler.dev',

@@ -103,9 +103,26 @@ DEVELOPMENT stage is what confirms it; nothing else prints the real error.
 A CloudFront Function's maximum size is **10,240 bytes and the quota is not adjustable**.
 Measured on the two-backend reference config, the gated preview router came to **9,767 bytes,
 of which 3,388 were comments** — 473 bytes of headroom against a backend block that costs
-~539. So `stripSourceComments()` drops comment-only lines from the emitted source, taking it
-to **6,426**, and the explanations live in the generators, where someone changing the
-behaviour actually reads them.
+~539. So `stripSourceComments()` drops comment-only lines from the emitted source, and the
+explanations live in the generators, where someone changing the behaviour actually reads them.
+
+Re-measured at 0.2.2, stripped, on `router.test.ts`'s reference config — two backends, and
+`GATE_PROPS`' client id and redirect URI. The absolute number moves with those strings (a real
+26-character client id is ~13 bytes more than the test's), so **price a change from the delta,
+not the total**; the earlier 6,426 and 6,547 figures in `progress.md` are the same source
+measured at 0.2.0 and 0.2.1:
+
+| Emitted source | Bytes |
+| --- | --- |
+| Gated preview router, no `ungatedPaths` | **6,531** |
+| …with `ungatedPaths: ['/api/health']` | **6,593** |
+| Ungated router (no gate at all) | 3,538 |
+
+**An ungated path costs `40 + 2 × length` bytes** — one unrolled clause pair on the gate's
+first line. `/api/health` is 62. That is why the list is unrolled rather than an array plus a
+loop: a loop is ~160 bytes of fixed overhead, so it only pays off past three paths. With
+`/auth` as the list's first element, an absent or empty `ungatedPaths` emits the **exact same
+bytes** the hardcoded line did — `gate.test.ts` pins that line character-for-character.
 
 - The strip is **line-anchored** (`^\s*//`). The emitted source contains `'https://'` inside
   string literals, and a `//`-anywhere strip would corrupt them.
@@ -155,6 +172,27 @@ variables and no other store, and because a preview key forges only preview sess
 - **`safeReturnPath` rejects `/\evil.com` as well as `//evil.com`.** The WHATWG URL parser
   treats `\` as `/` for http(s), so both are parsed as an authority. Blocking only `//` is the
   version of that check that looks right and is not.
+
+## What an ungated path leaks
+
+`AuthProps.ungatedPaths` (0.2.2) adds entries to the same list `/auth` is in. It exists because
+prod has **no machine identity by design** (A7), so without it nothing in a consumer's CI can
+reach a prod origin on a deploy — a deploy that breaks only in prod ships green.
+
+An ungated path is answered with **no check of any kind** — no cookie, no secret read, no
+`sec-fetch-mode` branch — by anyone on the internet, on prod *and* on every
+`pr-N.preview.<domain>` host. So it leaks its own **existence and liveness**: that a site is
+there and that this deployment is up. That is the intended payload of a health check and it is
+also the ceiling — **an ungated path must return no user data and no site content.** `/` and
+any prefix of the SPA shell are exactly wrong, which is why `'/'` throws at synth rather than
+silently ungating the site, along with a trailing `/`, `*?#`, whitespace, a quote, `/auth`
+itself, and a duplicate. Semantics are `/auth`'s exactly: exact match or `<path>/`, so
+`/api/health` exempts `/api/health/deep` and **not** `/api/healthz`. It is not a path pattern.
+
+The check runs **before** the `kvs.get(SECRET_KEY)`, so an ungated path costs one fewer KVS
+read and cannot 503 during secret propagation. Ordering already works on both sides: the
+preview router splices the gate in *after* the route lookup, so an ungated path still reaches
+the PR's backend; on prod the `backends` guards keep it off the `/index.html` rewrite.
 
 ## The gate costs two `kvs.get`s, and that breaks a documented rule
 

@@ -415,7 +415,7 @@ describe('Site', () => {
   })
 
   describe('edge gate', () => {
-    function buildWithGate(): { site: Site; template: Template } {
+    function buildWithGate(ungatedPaths?: readonly string[]): { site: Site; template: Template } {
       const app = new App()
       const stack = new Stack(app, 'WithGate', {
         env: { account: '111122223333', region: 'us-east-1' },
@@ -444,7 +444,7 @@ describe('Site', () => {
         zone,
         certificate,
         webDist,
-        auth: { domainPrefix: 'cdk-core', gate: 'edge' },
+        auth: { domainPrefix: 'cdk-core', gate: 'edge', ...(ungatedPaths ? { ungatedPaths } : {}) },
         backends: {
           api: {
             pathPattern: '/api/*',
@@ -482,6 +482,19 @@ describe('Site', () => {
       }[]
       expect(fns).toHaveLength(1)
       expect(fns[0]!.Properties.FunctionConfig?.KeyValueStoreAssociations).toHaveLength(1)
+    })
+
+    it('threads auth.ungatedPaths through to the check emitted in the SPA function source', () => {
+      const { template } = buildWithGate(['/api/health'])
+      const fns = Object.values(template.findResources('AWS::CloudFront::Function')) as {
+        Properties: { FunctionCode: unknown }
+      }[]
+      // Gated, the code renders as an `Fn::Join` — the client id is a token —
+      // so assert on the serialized form, the same way `.claude/rules/auth.md`
+      // item 3 says to for a value whose shape depends on what folded into it.
+      expect(JSON.stringify(fns[0]?.Properties.FunctionCode)).toContain(
+        "uri === '/api/health' || uri.indexOf('/api/health/') === 0",
+      )
     })
 
     it('gives the /auth/* behavior CACHING_DISABLED and no function association', () => {
