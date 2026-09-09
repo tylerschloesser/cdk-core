@@ -35,6 +35,17 @@ const APP_TS_REAL = `${REPO_ROOT}infra/bin/app.ts`
 
 const WORKFLOW_NAMES = ['deploy', 'pr-preview', 'pr-teardown', 'cleanup', 'publish']
 
+// `id-token: write` is a good proxy for "a workflow new-site provisions", but
+// not a perfect one: a workflow can exchange an OIDC token with something that
+// is neither AWS nor npm. `claude.yml` does — it trades the run's OIDC token
+// for a Claude GitHub App token — and it is not site infrastructure, so
+// new-site has no business shipping it and it gets no template.
+//
+// Listing it here rather than loosening the filter is the point: the guard
+// still fails for any *unconsidered* new workflow, which is what it is for. A
+// name only lands in this set by someone deciding it should, with a reason.
+const NOT_TEMPLATED: ReadonlyArray<string> = ['claude']
+
 // Longest-first: a shorter placeholder's value must never be a substring
 // match inside a longer one's.
 const SUBSTITUTIONS: ReadonlyArray<readonly [string, string]> = [
@@ -80,11 +91,14 @@ describe('workflow templates', () => {
     // role, but `publish.yml` requests the same permission for npm's
     // trusted-publishing OIDC exchange and touches no AWS at all. A new
     // workflow added later with either kind of OIDC use fails this test
-    // until a template exists for it.
+    // until a template exists for it — or until its name is added to
+    // `NOT_TEMPLATED` above, which is a deliberate act with a stated reason,
+    // not a way around the check.
     const workflowFiles = readdirSync(WORKFLOWS_DIR)
       .filter((name) => name.endsWith('.yml'))
       .filter((name) => readFileSync(`${WORKFLOWS_DIR}/${name}`, 'utf8').includes('id-token: write'))
       .map((name) => name.replace(/\.yml$/, ''))
+      .filter((name) => !NOT_TEMPLATED.includes(name))
       .sort()
 
     const templateFiles = readdirSync(TEMPLATES_DIR)
