@@ -2196,6 +2196,18 @@ to a behavior that matters. Recorded here because two versions shipped from this
 - Gated preview router: **9,767 bytes of the 10,240 quota, 3,388 of them comments**, against a
   backend block costing ~539 — one more backend and `CreateFunction` would have failed.
   `stripSourceComments()` took it to 6,426, then 6,547 with 0.2.1. A test trips at 8,192.
+- **The 0.2.2 change was proven on prod, not on a preview, and that was forced.** The gate is
+  spliced into the *preview router*, which lives in the shared preview stack (`CdkCorePreview`
+  / `YahnPreview`), deployed only from `main`. A PR stack contains **no CloudFront Function** —
+  `describe-stack-resources` on `Yahn-pr-24` confirms it. So a PR preview cannot exercise a
+  change to `ungatedPaths` (or to the gate at all) before merge; the choices are a hand-deploy
+  of the shared preview stack from the branch, or merge and let `deploy.yml`'s own poll be the
+  assertion. The second was chosen. **Expect this for any future gate change** — a green PR
+  preview says nothing about it.
+- **Verified anonymously on `yahn.ty.ler.dev` after the deploy**: `/api/health` → **200**
+  `{"ok":true}` (a real answer from the API Lambda), `/` → 302, `/api/v1/me` → 302,
+  `/index.html` → 302, and `/api/healthz` → **302** — the prefix-sibling boundary holds in
+  production, not just in the unit test. `deploy.yml` logged `answered 200 after 1 attempt(s)`.
 - **Re-measured at 0.2.2**, stripped, on `router.test.ts`'s reference config: the gated preview
   router is **6,531 bytes** with no `ungatedPaths` and **6,593** with `['/api/health']`; the
   ungated router is 3,538. **An ungated path costs `40 + 2 × length` bytes.** The total moves
@@ -2222,7 +2234,10 @@ to a behavior that matters. Recorded here because two versions shipped from this
 
 - `cdk-core.ty.ler.dev` is **not** gated — its own `bin/app.ts` never set `gate`, which is what
   exercised the ungated path on every CI run of this work. `yahn.ty.ler.dev` is gated, prod and
-  preview.
+  preview, **except `/api/health`** since 0.2.2: it is in `auth.ungatedPaths` there, and
+  `deploy.yml`'s post-deploy poll requires a literal 200 from it again, so prod origin health is
+  covered by CI once more. The *signed-in* half of prod is still a human, and still structurally
+  has to be (A7).
 - No `CdkCore-pr-*` stack is alive. PRs #15 and #16 merged and their previews were torn down.
 - `.claude/rules/` is now **eight** files; `edge-gate.md` is ~220 lines after 0.2.2 and CLAUDE.md records
   why it is exempt from the ~120 budget.
