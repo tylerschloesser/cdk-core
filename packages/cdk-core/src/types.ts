@@ -70,6 +70,27 @@ export interface AuthProps {
    * added later without a breaking change.
    */
   readonly gate?: 'edge'
+  /**
+   * Paths the edge gate lets through with **no authentication at all**, in
+   * addition to `/auth/*` (which is always exempt and must not be listed).
+   * Matched exactly the way `/auth` is: an exact match, or the path followed
+   * by `/`. `'/api/health'` exempts `/api/health` and `/api/health/deep`, but
+   * not `/api/healthz`.
+   *
+   * The intended use is a health check a deploy pipeline can poll without a
+   * credential — prod has no machine identity by design (A7), so without this
+   * nothing in CI can reach a prod origin.
+   *
+   * **What it costs.** An ungated path is reachable by anyone on the internet,
+   * on prod *and* on every `pr-N.preview.<domain>` host, with no cookie and no
+   * check of any kind — it leaks its own existence and liveness. It must
+   * therefore return no user data and no site content. `'/'` is rejected at
+   * synth, and any prefix of the SPA shell is exactly the wrong thing to list.
+   *
+   * Per-environment lists work: `preview` overrides this the way it overrides
+   * every other `AuthProps` field.
+   */
+  readonly ungatedPaths?: readonly string[]
 }
 
 /** Env vars the constructs put on a backend Lambda so `auth/server` can verify tokens. */

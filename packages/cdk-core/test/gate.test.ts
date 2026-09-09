@@ -253,3 +253,99 @@ describe('gate(request, pr), executed: PKCE on the 302', () => {
     expect(url.searchParams.get('code_challenge')).toBe(expected)
   })
 })
+
+/**
+ * `ungatedPaths` folds into the same list `/auth` is in, so these cases are
+ * as much about `/auth` still behaving as they are about the new entries.
+ * The emitted check has exact-match-or-`<path>/` semantics and nothing else:
+ * it is not a CloudFront path pattern, and `renderGateSource` throws at synth
+ * rather than emit one that would read like one.
+ */
+describe('renderGateSource with ungatedPaths', () => {
+  // The one line the whole feature turns on. Written out in full so a change
+  // to how it is built shows up here as a diff, not as a byte count.
+  const DEFAULT_CHECK = "  if (uri === '/auth' || uri.indexOf('/auth/') === 0) return null"
+
+  it('emits exactly the pre-ungatedPaths check when none are given', () => {
+    expect(renderGateSource(GATE_PROPS)).toContain(`${DEFAULT_CHECK}\n`)
+  })
+
+  it('emits byte-identical source for an absent and an empty ungatedPaths', () => {
+    expect(renderGateSource({ ...GATE_PROPS, ungatedPaths: [] })).toBe(renderGateSource(GATE_PROPS))
+  })
+
+  it('appends one clause pair per path, after the /auth pair', () => {
+    const source = renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/api/health'] })
+    expect(source).toContain(
+      "  if (uri === '/auth' || uri.indexOf('/auth/') === 0 || uri === '/api/health' || uri.indexOf('/api/health/') === 0) return null",
+    )
+  })
+
+  it('rejects a path that does not start with a slash', () => {
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ['api/health'] })).toThrow(/must start with/)
+  })
+
+  it('rejects "/" outright — it would ungate the whole site', () => {
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/'] })).toThrow(/whole site/)
+  })
+
+  it('rejects a trailing slash, which would emit a double slash in the prefix check', () => {
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/api/health/'] })).toThrow(/must not end with/)
+  })
+
+  it('rejects the CloudFront path-pattern characters it does not implement', () => {
+    for (const path of ['/api/*', '/api/health?x', '/api/health#f', '/api/health check']) {
+      expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: [path] })).toThrow(/path pattern/)
+    }
+  })
+
+  it('rejects a quote, which would break the single-quoted literal it is emitted into', () => {
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ["/api/'"] })).toThrow(/path pattern/)
+  })
+
+  it('rejects /auth and anything under it — already exempt, so listing it signals confusion', () => {
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/auth'] })).toThrow(/already ungated/)
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/auth/callback'] })).toThrow(/already ungated/)
+  })
+
+  it('rejects a duplicate', () => {
+    expect(() => renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/api/health', '/api/health'] })).toThrow(
+      /listed twice/,
+    )
+  })
+})
+
+describe('gate(request, pr), executed, with ungatedPaths', () => {
+  const source = renderGateSource({ ...GATE_PROPS, ungatedPaths: ['/api/health'] })
+
+  it('lets an ungated path through with no cookie and an empty KVS', async () => {
+    // The empty KVS is the assertion: it proves the check short-circuits
+    // before the secret read, so an ungated path costs one fewer KVS read
+    // than a gated one and cannot 503 during secret propagation.
+    const gate = loadGate(source, {})
+    expect(await gate(req('/api/health'), '')).toBeNull()
+  })
+
+  it('lets a path under an ungated path through', async () => {
+    const gate = loadGate(source, {})
+    expect(await gate(req('/api/health/deep'), '')).toBeNull()
+  })
+
+  it('does not let a sibling that merely shares the prefix through', async () => {
+    const gate = loadGate(source, { [SECRET_KEY]: SECRET })
+    expect((await gate(req('/api/healthz'), ''))?.statusCode).toBe(302)
+    expect((await gate(req('/api/health-check'), ''))?.statusCode).toBe(302)
+  })
+
+  it('still gates everything else', async () => {
+    const gate = loadGate(source, { [SECRET_KEY]: SECRET })
+    expect((await gate(req('/'), ''))?.statusCode).toBe(302)
+    expect((await gate(req('/api/v1/x'), ''))?.statusCode).toBe(302)
+  })
+
+  it('still lets /auth through once /auth is one entry in a longer list', async () => {
+    const gate = loadGate(source, {})
+    expect(await gate(req('/auth'), '')).toBeNull()
+    expect(await gate(req('/auth/callback'), '')).toBeNull()
+  })
+})

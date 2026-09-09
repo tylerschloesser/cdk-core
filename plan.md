@@ -879,6 +879,17 @@ export interface AuthProps {
   readonly refreshTokenValidity?: Duration
   /** Escape hatch applied to the UserPool props. */
   readonly userPoolOverrides?: Partial<cognito.UserPoolProps>
+  // [revised, Epoch 7] The gate. Added by 0.2.0 and recorded only in `progress.md` at the time,
+  // which left this interface stale; written down here at 0.2.2 while editing the same block.
+  // A string union, not a boolean, so an origin-side variant can be added without a break.
+  readonly gate?: 'edge'
+  // [revised, Epoch 7] 0.2.2. Paths the gate lets through unauthenticated, in addition to
+  // `/auth/*` (always exempt, rejected if listed). Exact match or `<path>/`, so '/api/health'
+  // exempts '/api/health/deep' and not '/api/healthz'. Exists because prod has no machine
+  // identity by design (A7): without it nothing in a consumer's CI can reach a prod origin.
+  // An ungated path is answered with no check at all on prod and every preview host, so it
+  // must return no user data and no site content — see `.claude/rules/edge-gate.md`.
+  readonly ungatedPaths?: readonly string[]
 }
 
 /** Env vars the constructs put on a backend Lambda so `auth/server` can verify tokens. */

@@ -145,6 +145,7 @@ export class PreviewSite extends Construct {
             clientId: browserClientId!,
             redirectUri: `https://oauth.preview.${props.domain}/`,
             preview: true,
+            ...(props.auth.ungatedPaths ? { ungatedPaths: props.auth.ungatedPaths } : {}),
           }
         : undefined
 

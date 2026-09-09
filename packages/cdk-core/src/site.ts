@@ -242,6 +242,7 @@ export class Site extends Construct {
           hostedUiDomain: hostedUiDomain!,
           clientId: clientId!,
           redirectUri: `https://${props.domain}/auth/callback`,
+          ...(props.auth?.ungatedPaths ? { ungatedPaths: props.auth.ungatedPaths } : {}),
         }
       : undefined
 

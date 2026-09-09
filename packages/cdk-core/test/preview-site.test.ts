@@ -25,16 +25,24 @@ const DOMAIN = 'cdk-core.ty.ler.dev'
  */
 const built = new Map<string, { site: PreviewSite; template: Template }>()
 
-function build(auth: boolean, gate = false): { site: PreviewSite; template: Template } {
-  const key = `${auth}:${gate}`
+function build(
+  auth: boolean,
+  gate = false,
+  ungatedPaths?: readonly string[],
+): { site: PreviewSite; template: Template } {
+  const key = `${auth}:${gate}:${ungatedPaths?.join(',') ?? ''}`
   const cached = built.get(key)
   if (cached) return cached
-  const result = synth(auth, gate)
+  const result = synth(auth, gate, ungatedPaths)
   built.set(key, result)
   return result
 }
 
-function synth(auth: boolean, gate: boolean): { site: PreviewSite; template: Template } {
+function synth(
+  auth: boolean,
+  gate: boolean,
+  ungatedPaths?: readonly string[],
+): { site: PreviewSite; template: Template } {
   const app = new App()
   const stack = new Stack(app, 'Preview', {
     env: { account: '111122223333', region: 'us-east-1' },
@@ -57,7 +65,13 @@ function synth(auth: boolean, gate: boolean): { site: PreviewSite; template: Tem
       events: { pathPattern: '/events/*', streaming: true },
     },
     ...(auth
-      ? { auth: { domainPrefix: 'cdk-core-preview', ...(gate ? { gate: 'edge' as const } : {}) } }
+      ? {
+          auth: {
+            domainPrefix: 'cdk-core-preview',
+            ...(gate ? { gate: 'edge' as const } : {}),
+            ...(ungatedPaths ? { ungatedPaths } : {}),
+          },
+        }
       : {}),
   })
   return { site, template: Template.fromStack(stack) }
@@ -247,6 +261,19 @@ describe('PreviewSite edge gate', () => {
     expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain('{{resolve:secretsmanager:')
     expect(JSON.stringify(env.AUTH_SESSION_SECRET)).toContain(
       `${DOMAIN}/preview-session-secret`,
+    )
+  })
+
+  it('threads auth.ungatedPaths through to the check emitted in the router source', () => {
+    const { template } = build(true, true, ['/api/health'])
+    const fns = Object.values(template.findResources('AWS::CloudFront::Function')) as {
+      Properties: { FunctionCode: unknown }
+    }[]
+    // Gated, the code renders as an `Fn::Join` — the client id is a token —
+    // so assert on the serialized form, the same way `.claude/rules/auth.md`
+    // item 3 says to for a value whose shape depends on what folded into it.
+    expect(JSON.stringify(fns[0]?.Properties.FunctionCode)).toContain(
+      "uri === '/api/health' || uri.indexOf('/api/health/') === 0",
     )
   })
 

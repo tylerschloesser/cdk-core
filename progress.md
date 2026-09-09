@@ -2181,18 +2181,35 @@ to a behavior that matters. Recorded here because two versions shipped from this
   `state` (`%7E`) and CloudFront Functions do not decode query-string values, so **every real
   preview sign-in 404'd** while every test and every synthetic `curl` stayed green — they all
   passed the raw `~`. Found by a human in a browser, not by CI.
+- **0.2.2** — `AuthProps.ungatedPaths`. cdk-core#18, filed from yahn#18: since 0.2.0 the gate
+  answered `/api/health` with a 302, and because prod has no machine identity by design (A7),
+  **nothing in a consumer's CI reached a prod origin on a deploy** — a prod-only breakage would
+  have shipped green. `renderGateSource` now folds `/auth` into a list and emits one unrolled
+  clause pair per entry, so an absent or empty list is byte-identical to the hardcoded line it
+  replaced. Validated at synth (no `/`, no trailing `/`, no `*?#`/quote/whitespace, not `/auth`,
+  no duplicate) because every one of those is a config that silently widens the gate. Threaded
+  through `AuthProps` → `Site` and `PreviewSite`; `defineSiteStacks` needed no edit, which also
+  gives a consumer per-environment lists for free via `auth.preview`.
 
 ### Measured
 
 - Gated preview router: **9,767 bytes of the 10,240 quota, 3,388 of them comments**, against a
   backend block costing ~539 — one more backend and `CreateFunction` would have failed.
   `stripSourceComments()` took it to 6,426, then 6,547 with 0.2.1. A test trips at 8,192.
+- **Re-measured at 0.2.2**, stripped, on `router.test.ts`'s reference config: the gated preview
+  router is **6,531 bytes** with no `ungatedPaths` and **6,593** with `['/api/health']`; the
+  ungated router is 3,538. **An ungated path costs `40 + 2 × length` bytes.** The total moves
+  with the client id and redirect URI, so the delta is the number to price against — which is
+  why the 8,192 tripwire now covers the configured shape as well as the default one.
 - **`crypto.createHash('sha256').…digest('base64')` works in `cloudfront-js-2.0`** — the one edge
   API AWS's docs do not spell out. Confirmed at a real edge: the PKCE challenge came back as 43
   base64url characters.
 - The gate costs a **second `kvs.get`** on the preview main path, a conscious deviation from
   `cdk.md` rule 4. `ComputeUtilization` has **not** been re-measured since; do that before
-  adding anything else to the function.
+  adding anything else to the function. **0.2.2 did not clear this debt and did not try to.**
+  It adds two string comparisons ahead of the existing KVS read, on a path that already ran two
+  of them — small, but unmeasured, and the entry stays until someone reads the metric at a real
+  edge (`Region=Global` as well as `FunctionName`, or you get an empty list and no error).
 
 ### Corrections to earlier entries
 
@@ -2207,5 +2224,5 @@ to a behavior that matters. Recorded here because two versions shipped from this
   exercised the ungated path on every CI run of this work. `yahn.ty.ler.dev` is gated, prod and
   preview.
 - No `CdkCore-pr-*` stack is alive. PRs #15 and #16 merged and their previews were torn down.
-- `.claude/rules/` is now **eight** files; `edge-gate.md` is ~170 lines and CLAUDE.md records
+- `.claude/rules/` is now **eight** files; `edge-gate.md` is ~220 lines after 0.2.2 and CLAUDE.md records
   why it is exempt from the ~120 budget.

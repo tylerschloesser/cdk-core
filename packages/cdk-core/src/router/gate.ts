@@ -32,6 +32,56 @@ export interface GateSourceProps {
   readonly redirectUri: string
   /** True on the preview router: the caller passes a PR number and it is appended to `state`. */
   readonly preview?: boolean
+  /**
+   * Extra paths the gate lets through unauthenticated, checked exactly the
+   * way `/auth` is: an exact match, or the path followed by `/`. `/auth` is
+   * always in the list and must not be repeated here.
+   *
+   * An ungated path is reachable by anyone, on prod *and* on every preview
+   * host — see `.claude/rules/edge-gate.md`, "What an ungated path leaks".
+   */
+  readonly ungatedPaths?: readonly string[]
+}
+
+/**
+ * Builds the ungated list — `/auth` first, so the default emission is
+ * byte-identical to what it was before this was configurable — and rejects
+ * anything whose emitted check would not mean what the caller thinks.
+ *
+ * Manual throws rather than a schema: this is the house style at synth
+ * (`site.ts`, `preview-site.ts`, `define-site-stacks.ts`) and there is no
+ * validation library in this package.
+ */
+function ungatedList(ungatedPaths: readonly string[] | undefined): readonly string[] {
+  const list = ['/auth']
+  for (const path of ungatedPaths ?? []) {
+    if (!path.startsWith('/')) {
+      throw new Error(`ungatedPaths: ${JSON.stringify(path)} must start with '/'`)
+    }
+    if (path === '/') {
+      throw new Error(`ungatedPaths: '/' would ungate the whole site`)
+    }
+    if (path.endsWith('/')) {
+      throw new Error(`ungatedPaths: ${JSON.stringify(path)} must not end with '/'`)
+    }
+    // `*` and `?` would suggest CloudFront path-pattern semantics, which this
+    // check does not have; `#` never reaches the origin; whitespace and the
+    // quote characters would break the single-quoted literal this is emitted
+    // into. All of them are a mistake, so none of them are silently accepted.
+    if (/[*?#'\\\s]/.test(path)) {
+      throw new Error(
+        `ungatedPaths: ${JSON.stringify(path)} must not contain '*', '?', '#', a quote or whitespace — this is an exact path, not a CloudFront path pattern`,
+      )
+    }
+    if (path === '/auth' || path.startsWith('/auth/')) {
+      throw new Error(`ungatedPaths: ${JSON.stringify(path)} is already ungated — /auth/* is always exempt`)
+    }
+    if (list.includes(path)) {
+      throw new Error(`ungatedPaths: ${JSON.stringify(path)} is listed twice`)
+    }
+    list.push(path)
+  }
+  return list
 }
 
 /**
@@ -42,6 +92,15 @@ export function renderGateSource(props: GateSourceProps): string {
     `https://${props.hostedUiDomain}/oauth2/authorize?client_id=${props.clientId}` +
     `&response_type=code&scope=openid+email&identity_provider=Google` +
     `&redirect_uri=${encodeURIComponent(props.redirectUri)}&state=`
+
+  // Unrolled rather than an array plus a loop: a loop costs ~160 bytes of
+  // fixed overhead against a measured 40 + 2×len per extra entry, so unrolled is
+  // cheaper for the one-to-three paths this is for — and with `/auth` first
+  // the default output is byte-identical to the pre-`ungatedPaths` line.
+  // Single quotes, not `JSON.stringify`: same byte count, same characters.
+  const ungatedCheck = ungatedList(props.ungatedPaths)
+    .map((path) => `uri === '${path}' || uri.indexOf('${path}/') === 0`)
+    .join(' || ')
 
   const stateBlock = props.preview
     ? `  var body
@@ -77,8 +136,10 @@ function gateHmac(secret, message) {
 async function gate(request, pr) {
   var uri = request.uri
   // /auth/* is its own behavior and carries no function of its own, but the
-  // gate's contract should be legible without reading the distribution.
-  if (uri === '/auth' || uri.indexOf('/auth/') === 0) return null
+  // gate's contract should be legible without reading the distribution. Any
+  // \`ungatedPaths\` the consumer configured are checked here too, before the
+  // KVS read — so an ungated path costs one fewer KVS read than a gated one.
+  if (${ungatedCheck}) return null
 
   // \`kvs.get\` must not be awaited inside its own argument list (a syntax
   // error in cloudfront-js-2.0) -- bind the awaited value to a variable first.
